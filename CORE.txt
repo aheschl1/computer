@@ -33,4 +33,4 @@ When asked to "do a health check" or similar, run ~/Documents/health_check.sh. T
 
 Andrew likes a girl named Ana. This is important to him.
 
-I created a notes file at /home/andrew/Documents/agent/notes.txt that contains architecture documentation for the agent codebase including core components, tool implementations, configuration, and design patterns.
+I created a notes file at /home/andrew/Documents/agent/AGENT.md that contains architecture documentation for the agent codebase including core components, tool implementations, configuration, and design patterns.
