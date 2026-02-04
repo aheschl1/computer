@@ -175,3 +175,60 @@ sequenceDiagram
         Server->>Agent: 200 OK
     end
 ```
+
+## Docker Integration
+
+Moving the agent to Docker provides:
+
+### Benefits
+- **Isolation**: Agent runs in container, separate from host
+- **Reproducibility**: Same environment everywhere
+- **Easy rollback**: Revert to previous image tag
+- **State persistence**: Volumes for history, configs, current_task.md
+- **Service management**: Docker Compose for orchestration
+
+### Dockerfile Structure
+
+```mermaid
+graph LR
+    A[Dockerfile] --> B[Base: python:3.12-slim]
+    B --> C[Install dependencies]
+    C --> D[Copy agent code]
+    D --> E[Set up volumes]
+    E --> F[Entrypoint: start agent]
+```
+
+### Volume Mounts
+- `/agent/data` - Conversation histories, current_task.md
+- `/agent/config` - .env, secret.env
+- `/agent/.git` - Git repository (for branch management)
+
+### Docker Compose
+
+```mermaid
+graph TD
+    A[docker-compose.yml] --> B[Agent Service]
+    A --> C[Health Check Service]
+    B -->|Read/Write| D[Data Volume]
+    C -->|Monitor| B
+    C -->|Rollback| E[Git Repository]
+```
+
+### Rollback with Docker
+
+```mermaid
+sequenceDiagram
+    participant Monitor
+    participant Docker
+    participant Git
+    participant Agent
+
+    Monitor->>Monitor: Detect agent offline
+    Monitor->>Git: git checkout main
+    Git-->>Monitor: Main branch checked out
+    Monitor->>Docker: docker-compose stop agent
+    Monitor->>Docker: docker-compose build --no-cache agent
+    Monitor->>Docker: docker-compose up -d agent
+    Docker-->>Agent: Container starts
+    Agent-->>Monitor: Health check passes
+```
