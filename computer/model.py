@@ -1,0 +1,232 @@
+import asyncio
+from json import loads
+import logging
+from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
+from pydantic import BaseModel
+from computer.config import Config
+from typing import Any, Awaitable, Callable, Dict, Tuple
+from computer.tools.tool import Tool
+from computer.utils import parse_tool_call
+import httpx
+
+logger = logging.getLogger(__name__)
+
+type CycleHook = Callable[[
+    str,                    # delta
+    str,                    # content up to now  
+    dict[int, dict],        # full tool calls so far
+    bool,                   # completed current stream
+    bool                    # completed full cycle (may have multiple streams)
+], Awaitable[bool]]         # returns False to stop
+
+class Computer:
+    def __init__(
+        self, 
+        tools: list[Tool] = [],
+        max_cycles: int = 50,
+        timeout: float = 120.0
+    ):
+        logger.info(f"Initializing Computer with {len(tools)} tools, max_cycles={max_cycles}, timeout={timeout}s")
+        self.client = OpenAI(
+            base_url=Config.get_endpoint(),
+            api_key=Config.get_api_key(),
+            timeout=timeout,
+        )
+        self.model = Config.get_model()
+        logger.info(f"Using model: {self.model} at endpoint: {Config.get_endpoint()}")
+        
+        self.tools = tools
+        self.tool_schemas = [tool.openai_tool for tool in tools]
+        self.tools_by_name = {tool.name: tool for tool in tools}
+        
+        self.history = [
+            {"role": "system", "content": Config.get_core()},
+            {"role": "system", "content": Config.get_system_prompt()}
+        ]
+        
+        self.max_cycles = max_cycles
+        
+    async def handle_tools(self, tool_calls: dict[int, dict]) -> dict[int, dict]:
+        logger.info(f"Handling {len(tool_calls)} tool call(s)")
+        results = {}
+        for index, call in tool_calls.items():
+            tool_name = call.get("name", "unknown")
+            logger.debug(f"Executing tool: {tool_name}")
+            result = await execute_tool_call(call, self.tools_by_name)
+            results[index] = {"result": result}
+            logger.debug(f"Tool {tool_name} completed with result length: {len(str(result))}")
+        return results
+
+    async def cycle(self, prompt: str | None, hook: CycleHook, depth: int = 0):
+        if depth >= self.max_cycles:
+            logger.warning(f"Maximum recursion depth ({self.max_cycles}) reached at depth {depth}")
+            error_msg = f"Maximum recursion depth ({self.max_cycles}) reached. Stopping to prevent infinite loop."
+            await hook("", error_msg, {}, True, True)
+            return
+            
+        if prompt:
+            logger.debug(f"Starting cycle at depth {depth} with prompt: {prompt[:100]}...")
+            message = {"role": "user", "content": prompt}
+            self.history.append(message)
+        else:
+            logger.debug(f"Continuing cycle at depth {depth} (tool response processing)")
+        
+        try:
+            logger.debug(f"Creating chat completion stream for model {self.model}")
+            stream = await self.call_model(
+                model=self.model,
+                messages=self.history, # type: ignore
+                stream=True,
+                tools=self.tool_schemas, # type: ignore
+                temperature=0.75
+            ) # type: ignore
+            
+            # Process the incoming stream and collect the final assistant text and any tool calls
+            logger.debug("Processing response stream")
+            response_content, full_tool_calls = await process_stream(stream, hook)
+            logger.debug(f"Stream processed: content_length={len(response_content)}, tool_calls={len(full_tool_calls)}")
+        except (APIConnectionError, APITimeoutError, httpx.TimeoutException, httpx.ConnectError, httpx.ReadTimeout) as e:
+            logger.error(f"Network error during API call: {str(e)}")
+            error_msg = f"Network error: {str(e)}\nStopping cycle."
+            await hook("", error_msg, {}, True, True)
+            return
+        except APIError as e:
+            logger.error(f"API error during call: {str(e)}")
+            error_msg = f"API error: {str(e)}\nStopping cycle."
+            await hook("", error_msg, {}, True, True)
+            return
+        except Exception as e:
+            logger.exception(f"Unexpected error during cycle: {str(e)}")
+            error_msg = f"Unexpected error: {str(e)}\nStopping cycle."
+            await hook("", error_msg, {}, True, True)
+            return
+        assistant_msg = make_assistant_msg(response_content, full_tool_calls)
+
+        self.history.append(assistant_msg)
+        
+        if full_tool_calls:
+            tool_results: dict[int, dict] = await self.handle_tools(full_tool_calls)
+            for idx, tool_result in tool_results.items():
+                # Get the ID from our reconstructed calls using the index
+                call_id = full_tool_calls[idx]["id"]
+                
+                self.history.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": str(tool_result["result"])
+                })
+        
+        cycle_again = full_tool_calls != {}
+        await hook(
+            "", 
+            response_content, 
+            full_tool_calls, 
+            True,
+            not cycle_again
+        )
+        if cycle_again:
+            await self.cycle(None, hook, depth + 1)
+    
+    
+    async def call_model(self, *args, **kwargs):
+        return await asyncio.to_thread(
+            self.client.chat.completions.create,
+            *args,
+            **kwargs,
+        )
+    
+    def __repr__(self) -> str:
+        return f"<Computer model={self.model} tools={len(self.tools)} history_msgs={len(self.history)}>"
+            
+
+async def process_stream(stream: Any, hook: CycleHook) -> Tuple[str, Dict[int, dict]]:
+    """Consume a streaming chat response and collect full assistant text and tool calls.
+
+    Args:
+        stream: An iterable/iterator of streaming chunks from the client.
+        hook: A callback hook called with (new_content, full_content, done).
+
+    Returns:
+        A tuple (response_content, full_tool_calls) where response_content is the
+        accumulated assistant text and full_tool_calls is a dict mapping tool-call
+        indices to reconstructed call info (id, name, arguments).
+    """
+    response_content = ""
+    full_tool_calls: Dict[int, dict] = {}
+
+    for chunk in stream:
+        # preserve original structure: chunks have choices[0].delta
+        delta = chunk.choices[0].delta
+
+        content = getattr(delta, "content", None)
+        if content:
+            # accumulate text and report incremental content to the hook
+            response_content += content
+            if await hook(content, response_content, full_tool_calls, False, False) is False:
+                break
+
+        tool_calls = getattr(delta, "tool_calls", None)
+        if tool_calls:
+            for tc_delta in tool_calls:
+                index = tc_delta.index
+                if index not in full_tool_calls:
+                    full_tool_calls[index] = {
+                        "id": tc_delta.id,
+                        "name": tc_delta.function.name,
+                        "arguments": "",
+                    }
+
+                args = getattr(tc_delta.function, "arguments", None)
+                if args:
+                    full_tool_calls[index]["arguments"] += args
+    return response_content, full_tool_calls
+
+async def execute_tool_call(
+    tool_call: dict,
+    tools_by_name: Dict[str, Tool]
+) -> str:
+    """Parse and execute a tool call, returning the result or error message.
+    
+    Args:
+        tool_call: Dict containing 'name' and 'arguments' (JSON string)
+        tool_models: Mapping of tool names to Pydantic model classes
+        tool_commands: Mapping of tool names to callable functions
+        
+    Returns:
+        The tool execution result as a string, or an error message.
+    """
+    tool_name = tool_call.get("name", "unknown")
+    logger.info(f"Executing tool call: {tool_name}")
+    
+    tool, tool_input, error = parse_tool_call(tool_call, tools_by_name)
+    
+    if error:
+        logger.error(f"Tool call parse error for {tool_name}: {error}")
+        return error
+    
+    try:
+        assert tool is not None and tool_input is not None
+        logger.debug(f"Tool {tool_name} input: {tool_input}")
+        result = await tool.execute(tool_input)
+        logger.info(f"Tool {tool_name} executed successfully, result length: {len(str(result))}")
+        return result
+    except Exception as e:
+        logger.exception(f"Error executing tool {tool_name}: {str(e)}")
+        return f"Error executing tool: {str(e)}"
+    
+def make_assistant_msg(response_content: str, full_tool_calls: Dict[int, dict]) -> dict:
+    """Construct the assistant message dict including tool_calls when present.
+    """
+    assistant_msg: dict = {"role": "assistant", "content": response_content or None}
+
+    if full_tool_calls:
+        assistant_msg["tool_calls"] = [
+            {
+                "id": tc["id"],
+                "type": "function",
+                "function": {"name": tc["name"], "arguments": tc["arguments"]},
+            }
+            for tc in full_tool_calls.values()
+        ]
+
+    return assistant_msg
