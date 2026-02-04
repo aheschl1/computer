@@ -122,3 +122,56 @@ Before any restart:
 3. Should we have a staging branch for testing?
 4. What level of testing should happen before merge?
 5. How to preserve long conversation history across restarts?
+
+## New: Server-Based Recovery System
+
+Andrew will build a server with the following capabilities:
+
+### Health Check Endpoint
+- Lightweight HTTP endpoint to store and retrieve conversation histories
+- Tracks agent uptime and detects offline periods
+- Auto-trigger rollback if offline for too long
+
+### Rollback Trigger
+- Monitors agent health via HTTP endpoint
+- If agent goes offline beyond threshold:
+  1. Rollback to main branch
+  2. Restart agent with saved conversation history
+  3. Resume from last known state
+
+### Architecture
+
+```mermaid
+graph TD
+    A[Agent tmux session] -->|HTTP POST| B[Andrew's Server]
+    B -->|Store history| C[Database]
+    B -->|Health check| D[Monitor]
+    D -->|Timeout detected| E[Rollback Trigger]
+    E -->|Checkout main| F[Git]
+    E -->|Restart agent| G[tmux]
+    C -->|Load history| G
+```
+
+### Rollback Flow
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Server
+    participant Git
+    participant Tmux
+
+    Agent->>Server: POST /health (keep-alive)
+    Server->>Server: Track last heartbeat
+    Server->>Server: Check timeout threshold
+    
+    alt Timeout exceeded
+        Server->>Git: git checkout main
+        Server->>Agent: POST /restart with history
+        Agent->>Tmux: Start new session
+        Tmux-->>Agent: Agent starts
+        Agent->>Server: POST /health (recovered)
+    else Normal operation
+        Server->>Agent: 200 OK
+    end
+```
