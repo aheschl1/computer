@@ -4,6 +4,7 @@ from typing_extensions import Literal
 
 from computer.config import Config
 import hashlib
+import aiofiles
 
 
 class Conversation:
@@ -62,13 +63,13 @@ class ConversationStorage:
         return Conversation.deserialize(data)
     
     @staticmethod
-    def save(conversation: Conversation, tag: str) -> None:
+    async def save(conversation: Conversation, tag: str) -> None:
         if not isinstance(tag, str):
             tag = str(tag)
         filename = hash(tag) + ".json"
         file = Config.cache_path() / filename
-        with open(file, "w") as f:
-            json.dump(conversation.serialize(), f)
+        async with aiofiles.open(file, "w") as f:
+            await f.write(json.dumps(conversation.serialize()))
             
     @staticmethod
     def load(tag: str) -> Conversation | None:

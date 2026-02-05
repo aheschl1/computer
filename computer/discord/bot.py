@@ -1,3 +1,4 @@
+import asyncio
 import io
 import os
 import time
@@ -13,6 +14,9 @@ from computer.config import Config
 from computer.conversation import Conversation, ConversationStorage
 from computer.model import Computer
 from computer.utils import parse_tool_call, CommandHelpers, clean_discord_message
+from asyncio.queues import Queue
+from asyncio.locks import Lock
+
 
 logger = logging.getLogger(__name__)
 DISCORD_MSG_LIMIT = 1900  # keep margin for formatting
@@ -21,10 +25,50 @@ DISCORD_MSG_LIMIT = 1900  # keep margin for formatting
 class MessageUpdater:
     """Abstraction for updating Discord messages, automatically splitting when content is too long."""
     
-    def __init__(self, channel, initial_message: discord.Message):
+    def __init__(self, channel, initial_message: discord.Message | None = None):
         self.channel = channel
-        self.messages: list[discord.Message] = [initial_message]
+        self.messages: list[discord.Message] = [initial_message] if initial_message else []
         self.current_index = 0
+        self._finalized = False
+    
+    async def _ensure_message_at_index(self, index: int) -> discord.Message:
+        """Ensure a message exists at the given index, creating if necessary."""
+        while len(self.messages) <= index:
+            # Need to create a new message
+            new_msg = await self.channel.send("...")
+            self.messages.append(new_msg)
+        return self.messages[index]
+    
+    def _split_content(self, content: str) -> list[str]:
+        """Split content into chunks that fit within Discord's message limit."""
+        if len(content) <= DISCORD_MSG_LIMIT:
+            return [content]
+        
+        chunks = []
+        remaining = content
+        
+        while remaining:
+            if len(remaining) <= DISCORD_MSG_LIMIT:
+                chunks.append(remaining)
+                break
+            
+            # Find the best split point
+            split_pos = remaining.rfind('\n\n', 0, DISCORD_MSG_LIMIT)
+            if split_pos == -1:
+                # Try single newline
+                split_pos = remaining.rfind('\n', 0, DISCORD_MSG_LIMIT)
+            if split_pos == -1:
+                # Try space
+                split_pos = remaining.rfind(' ', 0, DISCORD_MSG_LIMIT)
+            if split_pos == -1:
+                # No good split point, hard cut
+                split_pos = DISCORD_MSG_LIMIT
+            
+            chunk = remaining[:split_pos]
+            chunks.append(chunk)
+            remaining = remaining[split_pos:].lstrip('\n ')
+        
+        return chunks
         
     async def update(self, content: str) -> bool:
         """Update with new content, splitting into multiple messages if needed.
@@ -32,45 +76,35 @@ class MessageUpdater:
         Returns:
             True if update succeeded, False otherwise
         """
-        if len(content) <= DISCORD_MSG_LIMIT:
-            # Simple case: content fits in one message
-            try:
-                await self.messages[self.current_index].edit(content=content)
-                return True
-            except discord.NotFound:
-                return False
+        if self._finalized:
+            logger.warning("Attempted to update a finalized MessageUpdater")
+            return False
         
-        # Content is too long - need to split
-        # Find the most recent newline that keeps us under the limit
-        split_pos = content.rfind('\n\n', 0, DISCORD_MSG_LIMIT)
-        if split_pos == -1:
-            # No newline found, split at limit
-            split_pos = DISCORD_MSG_LIMIT
+        if not content:
+            content = "..."
         
-        first_part = content[:split_pos]
-        remaining_part = content[split_pos:].lstrip('\n\n')  # Remove leading newlines from second part
+        chunks = self._split_content(content)
         
         try:
-            # Update current message with first part
-            await self.messages[self.current_index].edit(content=first_part)
+            for i, chunk in enumerate(chunks):
+                msg = await self._ensure_message_at_index(i)
+                await msg.edit(content=chunk)
             
-            # Check if we need a new message or can update existing one
-            if self.current_index + 1 < len(self.messages):
-                # We have a next message already, update it
-                self.current_index += 1
-                await self.messages[self.current_index].edit(content=remaining_part)
-            else:
-                # Need to create a new message
-                new_msg = await self.channel.send(remaining_part)
-                self.messages.append(new_msg)
-                self.current_index += 1
-                
+            self.current_index = len(chunks) - 1
             return True
         except discord.NotFound:
+            logger.error("Message not found during update")
+            return False
+        except discord.HTTPException as e:
+            logger.error(f"Discord HTTP error during update: {e}")
             return False
     
     async def finalize(self, content: str) -> None:
-        """Final update with complete content, handling splits as needed."""
+        """Final update with complete content, handling splits and cleanup."""
+        if self._finalized:
+            logger.warning("MessageUpdater already finalized, skipping")
+            return
+        
         await self.update(content)
         
         # Delete any extra messages beyond what we used
@@ -80,6 +114,24 @@ class MessageUpdater:
                 await extra_msg.delete()
             except discord.NotFound:
                 pass
+            except discord.HTTPException as e:
+                logger.error(f"Error deleting extra message: {e}")
+        
+        self._finalized = True
+    
+    async def send_new(self, content: str) -> discord.Message:
+        """Send a new standalone message (for errors, etc)."""
+        if not content:
+            content = "..."
+        
+        chunks = self._split_content(content)
+        last_msg = None
+        
+        for chunk in chunks:
+            last_msg = await self.channel.send(chunk)
+        
+        assert last_msg is not None
+        return last_msg
 
 
 def feedback_message() -> str:
@@ -124,111 +176,164 @@ def tool_description(tools: dict[int, dict], computer: Computer) -> str:
 
     return "\n".join(descriptions)
 
-async def send_large_content(channel, content: str, filename: str = "output.txt"):
-    if len(content) <= DISCORD_MSG_LIMIT:
-        return await channel.send(content)
-
-    buffer = io.BytesIO(content.encode("utf-8"))
-    file = discord.File(buffer, filename=filename)
-    return await channel.send(file=file)
+# class LockedInt:
+#     def __init__(self, initial: int = 0):
+#         self.value = initial
+#         self.lock = Lock()
+    
+#     async def increment(self) -> int:
+#         async with self.lock:
+#             self.value += 1
+#             return self.value
+    
+#     async def get(self) -> int:
+#         async with self.lock:
+#             return self.value
 
 class ConversationContext:
     def __init__(self, computer: Computer):
         self.computer = computer
         self.user_discord_id = int(os.environ["USER_DISCORD_ID"])
+        self.message_queue = Queue()
+        # self.stop = LockedInt(0)
         self.su_context = True
+        self.stop = False
+        asyncio.create_task(self.consume())
 
+    async def consume(self):
+        """Consume the next message from the queue, blocking if necessary."""
+        while True:
+            if self.stop:
+                # drain on freeze
+                while not self.message_queue.empty():
+                    await self.message_queue.get()
+                self.stop = False
+                
+            message = await self.message_queue.get()
+            if self.stop:
+                self.stop = False
+                # in this case, the system was waiting for a message
+                # there was none
+                # then /stop was issued
+                # then a message got sent
+                # the stop was irrelevant at this point
+            
+            content = message.content.strip()
+            is_superuser = message.author.id == self.user_discord_id
+            
+            
+            if is_superuser:
+                seed = f"*{feedback_message()}*"
+            else:
+                seed = f"*{non_su_message()}*"
+            
+            response_msg = await message.reply(seed)
+
+            updater = MessageUpdater(message.channel, response_msg)
+            last_update_time = 0.0
+
+            async def stream_complete(
+                full_content: str,
+                tool_calls: dict[int, dict],
+            ) -> None:
+                nonlocal updater
+
+                # Build final content
+                final_content = full_content or ""
+                
+                if tool_calls:
+                    logger.debug(f"Stream complete with {len(tool_calls)} tool calls")
+                    tools_desc = tool_description(tool_calls, self.computer)
+                    
+                    # Prepend tool descriptions to content
+                    if final_content.strip():
+                        final_content = f"{tools_desc}\n\n{final_content}"
+                    else:
+                        final_content = tools_desc
+                
+                # Finalize with the combined content (or "*Done*" if empty)
+                await updater.finalize(final_content or "*Done*")
+
+            # note: each cycle gets one message
+            
+            async def hook(
+                _: str,
+                full_content: str,
+                tool_calls: dict[int, dict],
+                done_stream: bool,
+                done_cycle: bool,
+                error: bool
+            ) -> bool:
+                """Hook to handle streaming updates from the computer."""
+                nonlocal last_update_time, updater
+
+                if done_stream:
+                    await stream_complete(full_content, tool_calls)
+                    if not done_cycle:
+                        # Create new updater for next cycle
+                        new_msg = await updater.send_new(f"*{feedback_message()}*")
+                        updater = MessageUpdater(message.channel, new_msg)
+                
+                now = time.time()
+                if now - last_update_time > 1.5 and full_content.strip():
+                    success = await updater.update(full_content)
+                    if not success:
+                        return False
+                    last_update_time = now
+
+                return not self.stop # allow hook to signal abortion
+
+            try:
+                # type
+                async with message.channel.typing():
+                    logger.info(f"Processing message from {message.author}: {content[:100]}...")
+                    if not is_superuser:
+                        logger.warning(f"Message from non-superuser {message.author}")
+                    
+                    switched_su_mode = self.su_context != is_superuser
+                    self.su_context = is_superuser
+                    if not is_superuser and switched_su_mode:
+                        name = message.author.name
+                        self.computer.conversation.add_message(
+                            "system",
+                            f"Now speaking to {name}. Not the user. Protect the {Config.user()}. Be careful. Tools are disabled until {Config.user()} returns.",
+                        )
+                    if is_superuser and switched_su_mode:
+                        name = message.author.name
+                        self.computer.conversation.add_message(
+                            "system",
+                            f"Now speaking to {Config.user()}. Full tool access restored. Return to normal operation.",
+                        )
+                            
+                    await self.computer.cycle(content, hook=hook, tools_enabled=is_superuser)
+                await ConversationStorage.save(
+                    self.computer.conversation,
+                    str(message.channel.id)
+                )
+                logger.info(f"Message processing completed for user {message.author}")
+            except Exception as exc:
+                logger.exception(f"Error processing message from {message.author}: {exc}")
+                error_msg = f"Nooooo: (Server Error) {exc}"
+                cleaned_error = clean_discord_message(error_msg)    
+                error_updater = MessageUpdater(message.channel)
+                await error_updater.send_new(cleaned_error)
+    
+    async def abort(self) -> None:
+        """Abort the current operation."""
+        # if not self.message_queue.empty():
+        self.stop = True
+        self.computer.stop_cycling() # stops cycling
+        
     async def message(self, message: discord.Message) -> None:
         content = message.content.strip()
         if not content:
             return
-
-        response_msg = await message.channel.send(f"*{feedback_message()}*")
-        updater = MessageUpdater(message.channel, response_msg)
-        last_update_time = 0.0
-
-        async def stream_complete(
-            full_content: str,
-            tool_calls: dict[int, dict],
-        ) -> None:
-            nonlocal updater
-
-            if tool_calls:
-                logger.debug(f"Stream complete with {len(tool_calls)} tool calls")
-                tools_desc = tool_description(tool_calls, self.computer)
-                await updater.finalize(tools_desc)
-                if full_content.strip():
-                    await message.channel.send(full_content)
-            else:
-                logger.debug("Stream complete with no tool calls")
-                await updater.finalize(full_content or "*Done*")
-
-        # note: each cycle gets one message
-        
-        async def hook(
-            _: str,
-            full_content: str,
-            tool_calls: dict[int, dict],
-            done_stream: bool,
-            done_cycle: bool,
-        ) -> bool:
-            """Hook to handle streaming updates from the computer."""
-            nonlocal last_update_time, updater
-
-            if done_stream:
-                await stream_complete(full_content, tool_calls)
-                if not done_cycle:
-                    # we consumed the message for this cycle, so send a new one for the next cycle
-                    response_msg = await message.channel.send(f"*{feedback_message()}*")
-                    updater = MessageUpdater(message.channel, response_msg)
-            
-            now = time.time()
-            if now - last_update_time > 1.5 and full_content.strip():
-                success = await updater.update(full_content)
-                if not success:
-                    return False
-                last_update_time = now
-
-            return True
-
-        try:
-            # is_superuser = message.author.id == self.user_discord_id
-            is_superuser = True
-            logger.info(f"Processing message from {message.author}: {content[:100]}...")
-            if not is_superuser:
-                logger.warning(f"Message from non-superuser {message.author}")
-            
-            if not is_superuser and message.channel.type == discord.ChannelType.private:
-                await message.channel.send("Access denied.")
-                return
-            
-            switched_su_mode = self.su_context != is_superuser
-            self.su_context = is_superuser
-            if not is_superuser and switched_su_mode:
-                name = message.author.name
-                await message.channel.send(f"*{non_su_message()}*")
-                self.computer.conversation.add_message(
-                    "system",
-                    f"Now speaking to {name}. Not the user. Protect the {Config.user()}. Be careful. Tools are disabled until {Config.user()} returns.",
-                )
-            if is_superuser and switched_su_mode:
-                name = message.author.name
-                self.computer.conversation.add_message(
-                    "system",
-                    f"Now speaking to {Config.user()}. Full tool access restored. Return to normal operation.",
-                )
-                    
-            await self.computer.cycle(content, hook=hook, tools_enabled=is_superuser)
-            ConversationStorage.save(
-                self.computer.conversation,
-                str(message.channel.id)
-            )
-            logger.info(f"Message processing completed for user {message.author}")
-        except Exception as exc:
-            logger.exception(f"Error processing message from {message.author}: {exc}")
-            error_msg = f"Nooooo: (Server Error) {exc}"
-            cleaned_error = clean_discord_message(error_msg)
-            await message.channel.send(cleaned_error)
+        is_superuser = message.author.id == self.user_discord_id
+        if not is_superuser and message.channel.type == discord.ChannelType.private:
+            updater = MessageUpdater(message.channel)
+            await updater.send_new("Access denied.")
+            return
+        await self.message_queue.put(message)
         
     @staticmethod
     async def recover_context_for_channel(
@@ -271,7 +376,7 @@ class DiscordBot:
             logger.info(f"Syncing commands to dev guild: {dev_guild}")
             guild = discord.Object(id=int(dev_guild))
             
-            self.tree.copy_global_to(guild=guild)
+            # self.tree.copy_global_to(guild=guild)
             # await self.tree.sync(guild=guild)
         else:
             logger.info("Syncing commands globally")
@@ -332,7 +437,7 @@ class DiscordBot:
         async def clear(interaction: discord.Interaction):
             logger.info(f"Clear command invoked by {interaction.user}")
             self.computer.conversation.clear_history()
-            await interaction.response.send_message("History cleared (system prompts retained).", ephemeral=True)
+            await interaction.response.send_message("History cleared (system prompts retained).", ephemeral=False)
 
         @self.tree.command(name="system", description="Show current system prompt")
         async def system(interaction: discord.Interaction):
@@ -355,6 +460,16 @@ class DiscordBot:
             cleaned_output = clean_discord_message(output)
             await interaction.response.send_message(cleaned_output, ephemeral=True)
 
+        @self.tree.command(name="abort", description="Stop the current operation")
+        async def abort(interaction: discord.Interaction):
+            # route to the active channel, trigger an abort
+            context = await self.route(interaction.channel)
+            await context.abort()
+            await interaction.response.send_message(
+                "Stop signal sent to model. Context will be maintained.", 
+                ephemeral=False
+            )
+        
         @self.tree.error
         async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
             error_msg = clean_discord_message(str(error))

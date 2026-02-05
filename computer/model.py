@@ -18,7 +18,8 @@ type CycleHook = Callable[[
     str,                    # content up to now  
     dict[int, dict],        # full tool calls so far
     bool,                   # completed current stream
-    bool                    # completed full cycle (may have multiple streams)
+    bool,                   # completed full cycle (may have multiple streams)
+    bool                    # error occurred (if true, content may be error message)
 ], Awaitable[bool]]         # returns False to stop
 
 class Computer:
@@ -46,6 +47,7 @@ class Computer:
         self.tools_by_name = {tool.name: tool for tool in tools}
                 
         self.max_cycles = max_cycles
+        self.abort_signal = False
     
     def replicate(self) -> "Computer":
         logger.info("Replicating Computer instance")
@@ -75,13 +77,26 @@ class Computer:
     def history(self) -> list[dict]:
         return self.conversation.history
     
+    def stop_cycling(self) -> None:
+        logger.info("Abort signal set for current cycle")
+        self.abort_signal = True
+    
     async def cycle(self, prompt: str | None, hook: CycleHook, depth: int = 0, tools_enabled: bool = True) -> None:
         if depth >= self.max_cycles:
             logger.warning(f"Maximum recursion depth ({self.max_cycles}) reached at depth {depth}")
             error_msg = f"Maximum recursion depth ({self.max_cycles}) reached. Stopping to prevent infinite loop."
-            await hook("", error_msg, {}, True, True)
+            await hook("", error_msg, {}, True, True, True)
             return
-            
+        
+        if self.abort_signal:
+            self.abort_signal = False
+            if depth > 0: # if the abortion is true but level is 0, then the abortion came when there was no cycle running
+                logger.info("Cycle aborted by abort signal")
+                error_msg = "Agent loop aborted by user."
+                self.conversation.add_message("system", "Your work was paused by the user. Continue if the user wants.")
+                await hook("", error_msg, {}, True, True, True)
+                return
+        
         if prompt:
             logger.debug(f"Starting cycle at depth {depth} with prompt: {prompt[:100]}...")
             self.conversation.add_message("user", prompt)
@@ -105,17 +120,17 @@ class Computer:
         except (APIConnectionError, APITimeoutError, httpx.TimeoutException, httpx.ConnectError, httpx.ReadTimeout) as e:
             logger.error(f"Network error during API call: {str(e)}")
             error_msg = f"Network error: {str(e)}\nStopping cycle."
-            await hook("", error_msg, {}, True, True)
+            await hook("", error_msg, {}, True, True, True)
             return
         except APIError as e:
             logger.error(f"API error during call: {str(e)}")
             error_msg = f"API error: {str(e)}\nStopping cycle."
-            await hook("", error_msg, {}, True, True)
+            await hook("", error_msg, {}, True, True, True)
             return
         except Exception as e:
             logger.exception(f"Unexpected error during cycle: {str(e)}")
             error_msg = f"Unexpected error: {str(e)}\nStopping cycle."
-            await hook("", error_msg, {}, True, True)
+            await hook("", error_msg, {}, True, True, True)
             return
         
         self.handle_assistant_msg(response_content, full_tool_calls)
@@ -142,7 +157,8 @@ class Computer:
             response_content, 
             full_tool_calls, 
             True,
-            not cycle_again
+            not cycle_again,
+            False
         )
         if cycle_again:
             await self.cycle(None, hook, depth + 1)
@@ -201,7 +217,7 @@ async def process_stream(stream: Any, hook: CycleHook) -> Tuple[str, Dict[int, d
         if content:
             # accumulate text and report incremental content to the hook
             response_content += content
-            if await hook(content, response_content, full_tool_calls, False, False) is False:
+            if await hook(content, response_content, full_tool_calls, False, False, False) is False:
                 break
 
         tool_calls = getattr(delta, "tool_calls", None)
