@@ -53,12 +53,12 @@ class ChatInterface:
     def show_history(self):
         logger.debug("Displaying conversation history")
         print("\n=== Conversation History ===")
-        print(CommandHelpers.get_history_text(self.computer.history))
+        print(CommandHelpers.get_history_text(self.computer.conversation))
         print("============================\n")
     
     def clear_history(self):
         # Keep only system prompts
-        self.computer.history = CommandHelpers.clear_history(self.computer.history)
+        self.computer.conversation.clear_history()
         logger.info("Conversation history cleared (system prompts retained)")
         print("History cleared (system prompts retained).\n")
     
@@ -67,7 +67,7 @@ class ChatInterface:
         if not filename:
             filename = "history.json"
         success, message = CommandHelpers.save_history(
-            self.computer.history, 
+            self.computer.conversation, 
             self.computer.model, 
             filename
         )
@@ -83,7 +83,7 @@ class ChatInterface:
             filename = "history.json"
         history, timestamp, message = CommandHelpers.load_history(filename)
         if history is not None:
-            self.computer.history = history
+            self.computer.set_conversation(history)
             logger.info(f"History loaded from {filename} (saved at {timestamp})")
         else:
             logger.error(f"Failed to load history: {message}")

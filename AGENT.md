@@ -58,7 +58,6 @@ Current Configuration
 - Endpoint: http://10.8.0.15:8080/v1
 - Core file: CORE.txt (at project root)
 - User: Andrew (per USER_NAME env var)
-- Ana: Noted as important person to Andrew
 
 Tools Available
 ---------------

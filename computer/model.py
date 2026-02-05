@@ -1,10 +1,12 @@
 import asyncio
+import copy
 from json import loads
 import logging
 from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
 from pydantic import BaseModel
 from computer.config import Config
 from typing import Any, Awaitable, Callable, Dict, Tuple
+from computer.conversation import Conversation
 from computer.tools.tool import Tool
 from computer.utils import parse_tool_call
 import httpx
@@ -24,7 +26,8 @@ class Computer:
         self, 
         tools: list[Tool] = [],
         max_cycles: int = 50,
-        timeout: float = 120.0
+        timeout: float = 120.0,
+        conversation: Conversation | None = None,
     ):
         logger.info(f"Initializing Computer with {len(tools)} tools, max_cycles={max_cycles}, timeout={timeout}s")
         self.client = OpenAI(
@@ -35,17 +38,28 @@ class Computer:
         self.model = Config.get_model()
         logger.info(f"Using model: {self.model} at endpoint: {Config.get_endpoint()}")
         
+        self.root_conversation = copy.deepcopy(conversation) if conversation else Conversation()
+        self.conversation = conversation or Conversation()
+        self.timeout = timeout
         self.tools = tools
         self.tool_schemas = [tool.openai_tool for tool in tools]
         self.tools_by_name = {tool.name: tool for tool in tools}
-        
-        self.history = [
-            {"role": "system", "content": Config.get_core()},
-            {"role": "system", "content": Config.get_system_prompt()}
-        ]
-        
+                
         self.max_cycles = max_cycles
-        
+    
+    def replicate(self) -> "Computer":
+        logger.info("Replicating Computer instance")
+        return Computer(
+            tools=self.tools,
+            max_cycles=self.max_cycles,
+            timeout=self.timeout,
+            conversation=copy.deepcopy(self.root_conversation),
+        )
+    
+    def set_conversation(self, conversation: Conversation):
+        logger.info("Setting new conversation")
+        self.conversation = conversation
+    
     async def handle_tools(self, tool_calls: dict[int, dict]) -> dict[int, dict]:
         logger.info(f"Handling {len(tool_calls)} tool call(s)")
         results = {}
@@ -57,7 +71,11 @@ class Computer:
             logger.debug(f"Tool {tool_name} completed with result length: {len(str(result))}")
         return results
 
-    async def cycle(self, prompt: str | None, hook: CycleHook, depth: int = 0):
+    @property
+    def history(self) -> list[dict]:
+        return self.conversation.history
+    
+    async def cycle(self, prompt: str | None, hook: CycleHook, depth: int = 0, tools_enabled: bool = True) -> None:
         if depth >= self.max_cycles:
             logger.warning(f"Maximum recursion depth ({self.max_cycles}) reached at depth {depth}")
             error_msg = f"Maximum recursion depth ({self.max_cycles}) reached. Stopping to prevent infinite loop."
@@ -66,8 +84,7 @@ class Computer:
             
         if prompt:
             logger.debug(f"Starting cycle at depth {depth} with prompt: {prompt[:100]}...")
-            message = {"role": "user", "content": prompt}
-            self.history.append(message)
+            self.conversation.add_message("user", prompt)
         else:
             logger.debug(f"Continuing cycle at depth {depth} (tool response processing)")
         
@@ -100,21 +117,24 @@ class Computer:
             error_msg = f"Unexpected error: {str(e)}\nStopping cycle."
             await hook("", error_msg, {}, True, True)
             return
-        assistant_msg = make_assistant_msg(response_content, full_tool_calls)
-
-        self.history.append(assistant_msg)
+        
+        self.handle_assistant_msg(response_content, full_tool_calls)
         
         if full_tool_calls:
-            tool_results: dict[int, dict] = await self.handle_tools(full_tool_calls)
-            for idx, tool_result in tool_results.items():
-                # Get the ID from our reconstructed calls using the index
-                call_id = full_tool_calls[idx]["id"]
-                
-                self.history.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": str(tool_result["result"])
-                })
+            if not tools_enabled:
+                logger.warning("Tool calls received but tools are disabled. Skipping execution.")
+                self.conversation.add_message(
+                    "system",
+                    "Tool execution is currently disabled."
+                )
+            else:
+                tool_results: dict[int, dict] = await self.handle_tools(full_tool_calls)
+                for idx, tool_result in tool_results.items():
+                    self.conversation.add_message(
+                        "tool",
+                        str(tool_result["result"]),
+                        tool_call_id=full_tool_calls[idx]["id"],
+                    )
         
         cycle_again = full_tool_calls != {}
         await hook(
@@ -128,6 +148,25 @@ class Computer:
             await self.cycle(None, hook, depth + 1)
     
     
+    def handle_assistant_msg(self, response_content: str, full_tool_calls: Dict[int, dict]):
+        """Construct the assistant message dict including tool_calls when present.
+        """
+        tool_calls = None
+        if full_tool_calls:
+            tool_calls = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                }
+                for tc in full_tool_calls.values()
+            ]
+        self.conversation.add_message(
+            "assistant", 
+            response_content,
+            tool_calls=tool_calls
+        )
+    
     async def call_model(self, *args, **kwargs):
         return await asyncio.to_thread(
             self.client.chat.completions.create,
@@ -136,7 +175,7 @@ class Computer:
         )
     
     def __repr__(self) -> str:
-        return f"<Computer model={self.model} tools={len(self.tools)} history_msgs={len(self.history)}>"
+        return f"<Computer model={self.model} tools={len(self.tools)} history_msgs={len(self.conversation)}>"
             
 
 async def process_stream(stream: Any, hook: CycleHook) -> Tuple[str, Dict[int, dict]]:
@@ -213,20 +252,3 @@ async def execute_tool_call(
     except Exception as e:
         logger.exception(f"Error executing tool {tool_name}: {str(e)}")
         return f"Error executing tool: {str(e)}"
-    
-def make_assistant_msg(response_content: str, full_tool_calls: Dict[int, dict]) -> dict:
-    """Construct the assistant message dict including tool_calls when present.
-    """
-    assistant_msg: dict = {"role": "assistant", "content": response_content or None}
-
-    if full_tool_calls:
-        assistant_msg["tool_calls"] = [
-            {
-                "id": tc["id"],
-                "type": "function",
-                "function": {"name": tc["name"], "arguments": tc["arguments"]},
-            }
-            for tc in full_tool_calls.values()
-        ]
-
-    return assistant_msg

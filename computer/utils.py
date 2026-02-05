@@ -7,6 +7,7 @@ import json
 import logging
 from datetime import datetime
 
+from computer.conversation import Conversation
 from computer.tools.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -152,7 +153,7 @@ class CommandHelpers:
     """Helper methods for common commands that can be shared across interfaces."""
     
     @staticmethod
-    def get_history_text(history: List[dict], max_length: Optional[int] = None) -> str:
+    def get_history_text(history: Conversation, max_length: Optional[int] = None) -> str:
         """Format conversation history as text.
         
         Args:
@@ -204,7 +205,7 @@ class CommandHelpers:
         return [msg for msg in history if msg.get("role") == "system"]
     
     @staticmethod
-    def save_history(history: List[dict], model: str, filename: str) -> Tuple[bool, str]:
+    def save_history(history: Conversation, model: str, filename: str) -> Tuple[bool, str]:
         """Save conversation history to a JSON file.
         
         Args:
@@ -217,17 +218,13 @@ class CommandHelpers:
         """
         try:
             with open(filename, "w") as f:
-                json.dump({
-                    "timestamp": datetime.now().isoformat(),
-                    "model": model,
-                    "history": history
-                }, f, indent=2)
+                json.dump(history.serialize(), f, indent=2)
             return True, f"History saved to {filename}"
         except Exception as e:
             return False, f"Error saving history: {e}"
     
     @staticmethod
-    def load_history(filename: str) -> Tuple[Optional[List[dict]], str, str]:
+    def load_history(filename: str) -> Tuple[Conversation | None, str, str]:
         """Load conversation history from a JSON file.
         
         Args:
@@ -239,8 +236,8 @@ class CommandHelpers:
         try:
             with open(filename, "r") as f:
                 data = json.load(f)
-                history = data.get("history", [])
-                timestamp = data.get("timestamp", "unknown")
+                history = Conversation.deserialize(data)
+                timestamp = data.get("time", "unknown")
                 return history, timestamp, f"History loaded from {filename} (saved at {timestamp})"
         except FileNotFoundError:
             return None, "", f"File {filename} not found."

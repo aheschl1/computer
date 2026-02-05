@@ -1,5 +1,6 @@
 import os
 import datetime
+from pathlib import Path
 import dotenv
 
 dotenv.load_dotenv()
@@ -16,6 +17,17 @@ class Config:
     
     DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
     DEFAULT_CORE = "You are a helpful assistant."
+    
+    @staticmethod
+    def cache_path() -> Path:
+        path = os.getenv("CACHE_PATH", "./cache")
+        p = Path(path)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    
+    @staticmethod
+    def user() -> str:
+        return os.getenv("USER_NAME", "User")
     
     @staticmethod
     def get_model() -> str:

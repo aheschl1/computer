@@ -1,0 +1,84 @@
+import json
+from discord import datetime
+from typing_extensions import Literal
+
+from computer.config import Config
+import hashlib
+
+
+class Conversation:
+    def __init__(self, system_messages: list[str] | None = None):
+        self.history: list[dict[str, str]] = []
+        self.system_messages = system_messages or [Config.get_system_prompt(), Config.get_core()]
+        for msg in self.system_messages:
+            self.add_message("system", msg)
+    
+    def add_message(
+        self, 
+        role: Literal["system", "user", "assistant", "tool"], 
+        content: str,
+        tool_calls: list[dict] | None = None,
+        tool_call_id: str | None = None,
+    ):
+        m = {"role": role, "content": content}
+        if tool_calls is not None:
+            m["tool_calls"] = tool_calls # type: ignore
+        if tool_call_id is not None:
+            m["tool_call_id"] = tool_call_id
+        self.history.append(m)
+        
+    def clear_history(self):
+        self.history = [msg for msg in self.history if msg["role"] == "system"]
+    
+    def serialize(self) -> dict:
+        return {
+            "time": datetime.now().isoformat(),
+            "history": self.history,
+        }
+    
+    @staticmethod
+    def deserialize(data: dict):
+        conv = Conversation(system_messages=[])
+        conv.history = data.get("history", [])
+        return conv
+    
+    def __len__(self) -> int:
+        return len(self.history)
+    
+    def __iter__(self):
+        return iter(self.history)
+    
+
+def hash(tag: str) -> str:
+    return hashlib.sha256(tag.encode()).hexdigest()
+
+class ConversationStorage:
+    @staticmethod
+    def serialize(conversation: Conversation) -> dict:
+        return conversation.serialize()
+    
+    @staticmethod
+    def deserialize(data: dict) -> Conversation:
+        return Conversation.deserialize(data)
+    
+    @staticmethod
+    def save(conversation: Conversation, tag: str) -> None:
+        if not isinstance(tag, str):
+            tag = str(tag)
+        filename = hash(tag) + ".json"
+        file = Config.cache_path() / filename
+        with open(file, "w") as f:
+            json.dump(conversation.serialize(), f)
+            
+    @staticmethod
+    def load(tag: str) -> Conversation | None:
+        if not isinstance(tag, str):
+            tag = str(tag)
+        filename = hash(tag) + ".json"
+        try:
+            file = Config.cache_path() / filename
+            with open(file, "r") as f:
+                data = json.load(f)
+                return Conversation.deserialize(data)
+        except FileNotFoundError:
+            return None

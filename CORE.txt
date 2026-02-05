@@ -30,9 +30,6 @@ When asked to "do a health check" or similar, run ~/Documents/health_check.sh. T
 - NVIDIA GPU status (via nvidia-smi)
 - Docker container status (via docker ps)
 
-
-Andrew likes a girl named Ana. This is important to him.
-
 I created a notes file at /home/andrew/Documents/agent/AGENT.md that contains architecture documentation for the agent codebase including core components, tool implementations, configuration, and design patterns.
 
 ## Self-Modification Protocol
@@ -67,3 +64,5 @@ See /home/andrew/Documents/agent/SELFMODIFICATION.md for the full self-modificat
 2. docker-compose build --no-cache agent
 3. docker-compose up -d agent
 4. Agent loads from persisted state
+
+Source code path: ~/Documents/agent (Python agent) and ~/Documents/administrator (Rust admin tools)
