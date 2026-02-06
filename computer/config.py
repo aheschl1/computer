@@ -1,10 +1,17 @@
 import os
 import datetime
 from pathlib import Path
+import platform
+import subprocess
+import multiprocessing
 import dotenv
 
 dotenv.load_dotenv()
 dotenv.load_dotenv("secret.env")
+
+# Import after dotenv loads to ensure SKILLS_PATH is available
+from computer.skills import load_skills
+
 
 def try_get_file(path: str, default: str) -> str:
     try:
@@ -13,10 +20,54 @@ def try_get_file(path: str, default: str) -> str:
     except FileNotFoundError:
         return default
 
+def get_machine_stats() -> str:
+    """Gather information about the machine."""
+    stats = []
+    
+    # Operating System and Kernel
+    try:
+        stats.append(f"OS: {platform.system()} {platform.release()}")
+        stats.append(f"Distribution: {platform.platform()}")
+    except:
+        pass
+    
+    # CPU Information
+    try:
+        cpu_count = multiprocessing.cpu_count()
+        stats.append(f"CPU Cores: {cpu_count}")
+    except:
+        pass
+    
+    # Check for GPU (NVIDIA)
+    try:
+        result = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], 
+                              capture_output=True, text=True, timeout=2)
+        if result.returncode == 0 and result.stdout.strip():
+            gpu_names = result.stdout.strip().split('\n')
+            stats.append(f"GPU: {', '.join(gpu_names)}")
+        else:
+            stats.append("GPU: None detected (NVIDIA)")
+    except:
+        stats.append("GPU: None detected")
+    
+    # Memory information
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = f.read()
+            for line in meminfo.split('\n'):
+                if line.startswith('MemTotal'):
+                    mem_kb = int(line.split()[1])
+                    mem_gb = round(mem_kb / (1024 ** 2), 1)
+                    stats.append(f"RAM: {mem_gb} GB")
+                    break
+    except:
+        pass
+    
+    return " | ".join(stats) if stats else "Unable to gather machine stats"
+
 class Config:
     
     DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
-    DEFAULT_CORE = "You are a helpful assistant."
     
     @staticmethod
     def cache_path() -> Path:
@@ -42,21 +93,25 @@ class Config:
         return os.getenv("API_KEY", "none")
     
     @staticmethod
-    def core_path() -> str:
-        return os.getenv("CORE_FILE", "CORE.txt")
-    
-    @staticmethod
-    def get_core() -> str:
-        p = os.getenv("CORE", try_get_file(Config.core_path(), Config.DEFAULT_CORE))
-        p = p.replace("{{CORE_PATH}}", Config.core_path())
-        p = p.replace("{{USER_NAME}}", os.getenv("USER_NAME", "User"))
-        p = p.replace("{{DATE}}", datetime.datetime.now().strftime("%Y-%m-%d"))
-        return p
-
-    @staticmethod
     def get_system_prompt() -> str:
         p = os.getenv("SYSTEM_PROMPT", try_get_file(os.getenv("SYSTEM_PROMPT_FILE", "SYSTEM.txt"), Config.DEFAULT_SYSTEM_PROMPT))
         p = p.replace("{{DATE}}", datetime.datetime.now().strftime("%Y-%m-%d"))
         p = p.replace("{{USER_NAME}}", os.getenv("USER_NAME", "User"))
-        p = p.replace("{{CORE_PATH}}", Config.core_path())
+        p = p.replace("{{MACHINE_STATS}}", get_machine_stats())
+        p = p.replace("{{SKILLS}}", Config.get_skills_info())
+        p = p.replace("{{SKILLS_PATH}}", os.getenv("SKILLS_PATH", "skills"))
         return p
+    
+    @staticmethod
+    def get_skills_info() -> str:
+        """Format skills information for the system prompt."""
+        skills = load_skills()
+        if not skills:
+            return "No skills available."
+        
+        skills_info = []
+        for skill in skills:
+            skill_md_path = skill.path / "SKILL.md"
+            skills_info.append(f"- {skill.name}: {skill.description} (Load: {skill_md_path})")
+        
+        return "\n".join(skills_info)

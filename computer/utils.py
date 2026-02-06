@@ -255,16 +255,6 @@ class CommandHelpers:
         return Config.get_system_prompt()
     
     @staticmethod
-    def get_core() -> str:
-        """Get the current core content.
-        
-        Returns:
-            Core content text
-        """
-        from computer.config import Config
-        return Config.get_core()
-    
-    @staticmethod
     def get_tools_list(tool_schemas: List[dict]) -> str:
         """Format available tools as text.
         

@@ -1,5 +1,4 @@
 import asyncio
-import io
 import os
 import time
 import random
@@ -15,7 +14,6 @@ from computer.conversation import Conversation, ConversationStorage
 from computer.model import Computer
 from computer.utils import parse_tool_call, CommandHelpers, clean_discord_message
 from asyncio.queues import Queue
-from asyncio.locks import Lock
 
 
 logger = logging.getLogger(__name__)
@@ -158,7 +156,8 @@ def pydantic_pretty_print(obj: BaseModel) -> str:
     )
 
 
-def tool_description(tools: dict[int, dict], computer: Computer) -> str:
+# return a desc, and list of names of tools called, for logging purposes
+def tool_description(tools: dict[int, dict], computer: Computer) -> tuple[str, set[str]]:
     descriptions: list[str] = []
 
     for _, tool in tools.items():
@@ -174,29 +173,62 @@ def tool_description(tools: dict[int, dict], computer: Computer) -> str:
                 f"```yaml\n{pydantic_pretty_print(tool_args)}```"
             )
 
-    return "\n".join(descriptions)
+    names = {tool["name"] for tool in tools.values() if "name" in tool}
+    
+    return "\n".join(descriptions), names
 
-# class LockedInt:
-#     def __init__(self, initial: int = 0):
-#         self.value = initial
-#         self.lock = Lock()
+def get_log_channel(guild: discord.Guild | None) -> discord.TextChannel | None:
+    if guild is None:
+        return None
     
-#     async def increment(self) -> int:
-#         async with self.lock:
-#             self.value += 1
-#             return self.value
+    return discord.utils.get(
+        guild.text_channels,
+        name="logs"
+    )
+
+async def log_tool_call(source_message: discord.Message, ephemeral_message: str, tools_desc: str, timeout: float = 5.0):
+    log_channel = get_log_channel(source_message.guild)
+
+    # jump link to original message
+    jump_url = source_message.jump_url
+
+    # send log entry
+    if log_channel:
+        await log_channel.send(
+            f"**Tool Call**\n"
+            f"Source: {source_message.author.mention}\n"
+            f"Channel: {source_message.channel.mention}\n" # type: ignore
+            f"Message: {jump_url}\n\n"
+            f"**Tool Details**\n{tools_desc}"
+        )
+    # else:
+    #     timeout = None
+    # else:
+    #     # dm the user the log if no log channel found
+    #     try:
+    #         await source_message.author.send(
+    #             f"**Tool Call Logged**\n"
+    #             f"Source: {source_message.author.mention}\n"
+    #             f"Channel: {source_message.channel.name}\n"
+    #             f"Message: {jump_url}\n\n"
+    #             f"**Tool Details**\n{tools_desc}"
+    #         )
     
-#     async def get(self) -> int:
-#         async with self.lock:
-#             return self.value
+    # # temporary notification in main channel
+    # await source_message.channel.send(
+    #     ephemeral_message,
+    #     delete_after=timeout
+    # ) # type: ignore
 
 class ConversationContext:
     def __init__(self, computer: Computer):
         self.computer = computer
         self.user_discord_id = int(os.environ["USER_DISCORD_ID"])
-        self.message_queue = Queue()
+        # holds messages, and index in Conversation when they were added
+        self.message_queue: Queue[discord.Message] = Queue()
         # self.stop = LockedInt(0)
         self.su_context = True
+        self.protected_mode = True
         self.stop = False
         asyncio.create_task(self.consume())
 
@@ -219,8 +251,7 @@ class ConversationContext:
                 # the stop was irrelevant at this point
             
             content = message.content.strip()
-            is_superuser = message.author.id == self.user_discord_id
-            
+            is_superuser = message.author.id == self.user_discord_id or not self.protected_mode            
             
             if is_superuser:
                 seed = f"*{feedback_message()}*"
@@ -243,14 +274,17 @@ class ConversationContext:
                 
                 if tool_calls:
                     logger.debug(f"Stream complete with {len(tool_calls)} tool calls")
-                    tools_desc = tool_description(tool_calls, self.computer)
+                    tools_desc, names = tool_description(tool_calls, self.computer)
                     
                     # Prepend tool descriptions to content
-                    if final_content.strip():
-                        final_content = f"{tools_desc}\n\n{final_content}"
-                    else:
-                        final_content = tools_desc
-                
+                    final_content = f"*[{len(tool_calls)} Tools Called ({', '.join(names)})]*\n\n{final_content}"
+                    # asyncio.create_task(message.channel.send(f"**Tool Details**\n{tools_desc}", delete_after=5))
+                    await log_tool_call(
+                        source_message=message,
+                        ephemeral_message=f"**Tool Call**\n{tools_desc}",
+                        tools_desc=tools_desc,
+                        timeout=3
+                    )
                 # Finalize with the combined content (or "*Done*" if empty)
                 await updater.finalize(final_content or "*Done*")
 
@@ -376,8 +410,8 @@ class DiscordBot:
             logger.info(f"Syncing commands to dev guild: {dev_guild}")
             guild = discord.Object(id=int(dev_guild))
             
-            # self.tree.copy_global_to(guild=guild)
-            # await self.tree.sync(guild=guild)
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
         else:
             logger.info("Syncing commands globally")
             await self.tree.sync()
@@ -436,20 +470,14 @@ class DiscordBot:
         @self.tree.command(name="clear", description="Clear conversation history (keeps system prompts)")
         async def clear(interaction: discord.Interaction):
             logger.info(f"Clear command invoked by {interaction.user}")
-            self.computer.conversation.clear_history()
+            context = await self.route(interaction.channel)
+            context.computer.conversation.clear_history()
             await interaction.response.send_message("History cleared (system prompts retained).", ephemeral=False)
 
         @self.tree.command(name="system", description="Show current system prompt")
         async def system(interaction: discord.Interaction):
             system_prompt = CommandHelpers.get_system_prompt()
             output = f"**System Prompt**\n```\n{system_prompt}\n```"
-            cleaned_output = clean_discord_message(output)
-            await interaction.response.send_message(cleaned_output, ephemeral=True)
-
-        @self.tree.command(name="core", description="Show current core")
-        async def core(interaction: discord.Interaction):
-            core_content = CommandHelpers.get_core()
-            output = f"**Core**\n```\n{core_content}\n```"
             cleaned_output = clean_discord_message(output)
             await interaction.response.send_message(cleaned_output, ephemeral=True)
 
@@ -469,6 +497,28 @@ class DiscordBot:
                 "Stop signal sent to model. Context will be maintained.", 
                 ephemeral=False
             )
+        
+        @self.tree.command(name="toggle_protected", description="Toggle protected mode (for testing, use with caution)")
+        async def toggle_protected(interaction: discord.Interaction):
+            if interaction.user.id != int(os.environ["USER_DISCORD_ID"]):
+                await interaction.response.send_message(
+                    "You do not have permission to use this command.",
+                    ephemeral=True
+                )
+                return
+            # toggle su_context for this channel
+            context = await self.route(interaction.channel)
+            context.computer.conversation.clear_history()
+            
+            context.protected_mode = not context.protected_mode
+            context.su_context = True
+            
+            mode = "Protected" if context.protected_mode else "Not protected"
+            await interaction.response.send_message(
+                f"Context mode toggled. Current mode: {mode}",
+                ephemeral=False
+            )
+            await interaction.channel.send("History cleared (system prompts retained).") # type: ignore
         
         @self.tree.error
         async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):

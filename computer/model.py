@@ -29,6 +29,7 @@ class Computer:
         max_cycles: int = 50,
         timeout: float = 120.0,
         conversation: Conversation | None = None,
+        temperature: float = 1.0,
     ):
         logger.info(f"Initializing Computer with {len(tools)} tools, max_cycles={max_cycles}, timeout={timeout}s")
         self.client = OpenAI(
@@ -45,7 +46,8 @@ class Computer:
         self.tools = tools
         self.tool_schemas = [tool.openai_tool for tool in tools]
         self.tools_by_name = {tool.name: tool for tool in tools}
-                
+        self.temperature = temperature
+        
         self.max_cycles = max_cycles
         self.abort_signal = False
     
@@ -81,7 +83,18 @@ class Computer:
         logger.info("Abort signal set for current cycle")
         self.abort_signal = True
     
-    async def cycle(self, prompt: str | None, hook: CycleHook, depth: int = 0, tools_enabled: bool = True) -> None:
+    async def cycle(
+        self, 
+        prompt: str | None, 
+        hook: CycleHook, 
+        depth: int = 0, 
+        tools_enabled: bool = True,
+        # # these args are for eliminating a chunk of context. imagine message a comes. it starts being handled. message b comes nefore the response.
+        # # message bs response should not include message a's response as context.
+        # conversation_branch: int = -1, # we can work with only up to ith message in conversation. non inclusive index
+        # conversation_merge: int = -1,  # the context merges back at this message index. inclusive index
+    ) -> None:
+            
         if depth >= self.max_cycles:
             logger.warning(f"Maximum recursion depth ({self.max_cycles}) reached at depth {depth}")
             error_msg = f"Maximum recursion depth ({self.max_cycles}) reached. Stopping to prevent infinite loop."
@@ -96,21 +109,36 @@ class Computer:
                 self.conversation.add_message("system", "Your work was paused by the user. Continue if the user wants.")
                 await hook("", error_msg, {}, True, True, True)
                 return
+        # if conversation_branch >= 0 and conversation_merge >= 0:
+        #     if conversation_branch >= conversation_merge:
+        #         logger.error("Invalid conversation branch/merge indices")
+        #         error_msg = "Invalid conversation branch/merge indices. Stopping cycle."
+        #         await hook("", error_msg, {}, True, True, True)
+        #         return
         
         if prompt:
             logger.debug(f"Starting cycle at depth {depth} with prompt: {prompt[:100]}...")
             self.conversation.add_message("user", prompt)
+            # if conversation_branch >= 0:
+            #     # because we add the new message, we are responsible for including it
+            #     conversation_branch += 1
         else:
             logger.debug(f"Continuing cycle at depth {depth} (tool response processing)")
         
         try:
             logger.debug(f"Creating chat completion stream for model {self.model}")
+            history = self.history
+            # if conversation_branch >= 0:
+            #     history = history[:conversation_branch]
+            # if conversation_merge >= 0:
+            #     history += self.conversation.history[conversation_merge:]
+                
             stream = await self.call_model(
                 model=self.model,
-                messages=self.history, # type: ignore
+                messages=history, # type: ignore
                 stream=True,
                 tools=self.tool_schemas, # type: ignore
-                temperature=0.75
+                temperature=self.temperature,
             ) # type: ignore
             
             # Process the incoming stream and collect the final assistant text and any tool calls
@@ -161,7 +189,12 @@ class Computer:
             False
         )
         if cycle_again:
-            await self.cycle(None, hook, depth + 1)
+            # if conversation_branch >= 0:
+            #     # we need to set a merge if it does not exist
+            #     if conversation_merge < 0:
+            #         conversation_merge = len(self.conversation.history) - 1
+                
+            await self.cycle(None, hook, depth + 1, tools_enabled)
     
     
     def handle_assistant_msg(self, response_content: str, full_tool_calls: Dict[int, dict]):

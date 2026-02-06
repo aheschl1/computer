@@ -24,7 +24,8 @@ class ChatInterface:
         _full_content: str, 
         full_tool_calls: dict[int, dict], 
         done: bool,
-        _: bool
+        _: bool,
+        __: bool
     ) -> bool:
         print(new_content, end="", flush=True)
         if done:
@@ -46,7 +47,6 @@ class ChatInterface:
         print("/save      - Save conversation history to file")
         print("/load      - Load conversation history from file")
         print("/system    - Show current system prompt")
-        print("/core      - Show current core")
         print("/tools     - List available tools")
         print("========================\n")
     
@@ -95,12 +95,6 @@ class ChatInterface:
         print(CommandHelpers.get_system_prompt())
         print("=====================\n")
     
-    def show_core(self):
-        logger.debug("Displaying core")
-        print("\n=== Core ===")
-        print(CommandHelpers.get_core())
-        print("============\n")
-    
     def show_tools(self):
         logger.debug("Displaying available tools")
         print("\n=== Available Tools ===")
@@ -146,9 +140,6 @@ class ChatInterface:
                     elif user_input.lower() == "/system":
                         self.show_system_prompt()
                         continue
-                    elif user_input.lower() == "/core":
-                        self.show_core()
-                        continue
                     elif user_input.lower() == "/tools":
                         self.show_tools()
                         continue
@@ -156,7 +147,7 @@ class ChatInterface:
                     # Process regular message
                     logger.debug(f"Processing user message: {user_input[:50]}...")
                     print("Assistant: ", end="", flush=True)
-                    await self.computer.cycle(user_input, self.print_hook)
+                    await self.computer.cycle(user_input, self.print_hook) #
                     print()  # Extra newline for spacing
                     
                 except KeyboardInterrupt:

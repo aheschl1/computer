@@ -10,7 +10,7 @@ import aiofiles
 class Conversation:
     def __init__(self, system_messages: list[str] | None = None):
         self.history: list[dict[str, str]] = []
-        self.system_messages = system_messages or [Config.get_system_prompt(), Config.get_core()]
+        self.system_messages = system_messages or [Config.get_system_prompt()]
         for msg in self.system_messages:
             self.add_message("system", msg)
     
