@@ -6,6 +6,8 @@ import subprocess
 import multiprocessing
 import dotenv
 
+from computer.tasks.task import Task
+
 dotenv.load_dotenv()
 dotenv.load_dotenv("secret.env")
 
@@ -103,6 +105,18 @@ class Config:
         return p
     
     @staticmethod
+    def get_task_system_prompt(task: Task, results: str) -> str:
+        prompt = Config.get_system_prompt()
+        prompt += f"\n\n You also are used for executing scheduled tasks. That is how this conversation was started.\
+        The task that is being executed: \
+        Name: {task.name} \
+        Description: {task.description()} \
+        Frequency of task: {task.schema.periodicity()} \
+        The task output the following results: {results} \
+        Speak directly to the user about the results."
+        return prompt
+    
+    @staticmethod
     def get_skills_info() -> str:
         """Format skills information for the system prompt."""
         skills = load_skills()
@@ -115,3 +129,7 @@ class Config:
             skills_info.append(f"- {skill.name}: {skill.description} (Load: {skill_md_path})")
         
         return "\n".join(skills_info)
+    
+    @staticmethod
+    def get_task_forum_id() -> int:
+        return int(os.getenv("TASK_FORUM_ID", "0"))

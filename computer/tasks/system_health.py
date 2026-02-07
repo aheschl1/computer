@@ -6,16 +6,17 @@ from computer.skills import load_skill_by_name
 from computer.tasks.task import TaskParams, task
 from computer.tools.system import ExecuteCommand
 
-class SystemHealthParams(TaskParams):
+class SystemHealthTask(TaskParams):
     """
-    Parameters for the SystemHealthTask. This task runs a system health check and reports the results.
+    Periodic check of system health. If any issues are detected, report. Otherwise, report that the system is healthy. 
     """
     @staticmethod
     def periodicity() -> str:
-        return "* * * * *"  # Every minute
+        # every day at 7 am, and at 7 pm
+        return "0 7,19 * * *"
 
-@task(SystemHealthParams)
-async def run_health_check(_input: SystemHealthParams):
+@task(SystemHealthTask)
+async def run_health_check(_input: SystemHealthTask):
     health_skill = load_skill_by_name("health-check")
     if not health_skill:
         return "Health check skill not found."

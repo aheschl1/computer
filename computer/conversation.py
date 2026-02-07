@@ -52,12 +52,13 @@ class Conversation:
     def serialize(self) -> dict:
         return {
             "time": datetime.now().isoformat(),
-            "history": self._history,
+            "history": self._history
         }
     
     @staticmethod
     def deserialize(data: dict):
         conv = Conversation(system_messages=[])
+        # maintain the invariant that system messages are at the start of the history
         conv._history = data.get("history", [])
         return conv
     

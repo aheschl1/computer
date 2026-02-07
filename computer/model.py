@@ -136,11 +136,11 @@ class Computer:
         try:
             logger.debug(f"Creating chat completion stream for model {self.model}")
             history = self.history
+            # print(history)
             # if conversation_branch >= 0:
             #     history = history[:conversation_branch]
             # if conversation_merge >= 0:
             #     history += self.conversation.history[conversation_merge:]
-                
             stream = await self.call_model(
                 model=self.model,
                 messages=history, # type: ignore

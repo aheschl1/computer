@@ -179,6 +179,11 @@ async def main():
         action="store_true",
         help="Start the Discord bot instead of the CLI interface"
     )
+    parser.add_argument(
+        "--notasks",
+        action="store_true",
+        help="Disable scheduled tasks (only for Discord mode)"
+    )
     args = parser.parse_args()
     
     # Initialize computer with tools
@@ -194,7 +199,7 @@ async def main():
     if args.discord:
         logger.info("Starting Discord bot...")
         print("Starting Discord bot...")
-        await run_discord(computer)
+        await run_discord(computer, enable_tasks=not args.notasks)
     else:
         logger.info("Starting CLI interface")
         interface = ChatInterface(computer)

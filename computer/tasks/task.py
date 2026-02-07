@@ -1,7 +1,3 @@
-
-
-
-
 import abc
 import asyncio
 import datetime
@@ -40,6 +36,10 @@ class Task[T: TaskParams]:
         self.schema: Type[T] = schema
         self.function = function
         self.name = schema.__name__
+    
+    def description(self) -> str:
+        """Returns the description of the task, which is the docstring of the function."""
+        return self.function.__doc__ or "No description provided."
     
     async def execute(self, input: T, approval_hook: "ApprovalHook | None" = None) -> str:
         fn = self.function

@@ -266,7 +266,7 @@ class ConversationContext:
             self.stop = False
             
             content = message.content.strip()
-            is_superuser = message.author.id == self.user_discord_id or not self.protected_mode            
+            is_superuser = (message.author.id == self.user_discord_id or message.author.id == self.client.user.id) or not self.protected_mode            
             
             if is_mention_only_channel(message.channel) and include_content: # type: ignore
                 if not bot_is_mentioned(self.client, message):
@@ -400,14 +400,15 @@ class ConversationContext:
         channel, 
         computer: Computer,
         client: discord.Client,
+        conversation: Conversation | None = None
     ) -> "ConversationContext":
         channel_id = channel.id
-        conversation: Conversation | None = ConversationStorage.load(str(channel_id))
-        if conversation is None and hasattr(channel, "parent") and channel.parent is not None:
+        final_conversation: Conversation | None = conversation or ConversationStorage.load(str(channel_id))
+        if final_conversation is None and hasattr(channel, "parent") and channel.parent is not None:
             parent_channel = channel.parent
             parent_id = parent_channel.id
-            conversation = ConversationStorage.load(parent_id)
-        computer.set_conversation(conversation or Conversation())
+            final_conversation = ConversationStorage.load(parent_id)
+        computer.set_conversation(final_conversation or Conversation())
         return ConversationContext(computer, client)
             
 class DiscordBot:
@@ -528,20 +529,23 @@ class DiscordBot:
         async def on_message(message: discord.Message):
             await self.handle_message(message)
 
-    async def route(self, channel) -> ConversationContext:
+    async def route(self, channel, conversation: Conversation | None = None) -> ConversationContext:
         """Route to the appropriate ConversationContext based on channel ID."""
         if channel.id not in self.contexts:
             context = None
             if channel.type in [
-                discord.ChannelType.public_thread, 
+                discord.ChannelType.public_thread,
                 discord.ChannelType.private_thread,
                 discord.ChannelType.private,
             ]:
                 # persistent context type
-                context = await ConversationContext.recover_context_for_channel(channel, self.computer.replicate(), self.client)
+                context = await ConversationContext.recover_context_for_channel(channel, self.computer.replicate(), self.client, conversation)
             else:
                 # ephemeral context type
-                context = ConversationContext(self.computer.replicate(), self.client)
+                computer = self.computer.replicate()
+                if conversation:
+                    computer.set_conversation(conversation)
+                context = ConversationContext(computer, self.client)
             self.contexts[channel.id] = context
         return self.contexts[channel.id]
     
@@ -650,27 +654,48 @@ class DiscordBot:
 async def prepare_tasks(bot: DiscordBot):
         
     def build_trigger[T: TaskParams](task: Task[T]):
-        # user dms
+        # Create thread in forum channel
         async def trigger():
-            # Fetch the user and create a DM channel
-            user = await bot.client.fetch_user(int(os.environ["USER_DISCORD_ID"]))
-            channel = await user.create_dm()
-            logger.info(f"Triggering scheduled task: {task.schema.__name__}")
-            task_params = task.schema(
-                datetime.datetime.now()
-            )
-            message = await channel.send(f"Scheduled task triggered: {task.schema.__name__}")
+            task_forum_id = Config.get_task_forum_id()
+            if task_forum_id == 0:
+                logger.warning(f"TASK_FORUM_ID not configured, skipping task: {task.schema.__name__}")
+                return
             
-            context = await bot.route(channel)
-            context.computer.conversation.mask(0) # mask the conversation to prevent loading too much history for the task execution
-            response = await task.execute(task_params)
-            context.computer.conversation.add_message(
-                "system",
-                f"Start scheduled task: {task.schema.__name__}. \
-                Result of trigger: {response}. Act appropriately. \
-                Your responses will be sent to the user."
-            )
-            await context.message(message, exclude=True)
+            try:
+                forum_channel = bot.client.get_channel(task_forum_id)
+                if forum_channel is None:
+                    forum_channel = await bot.client.fetch_channel(task_forum_id)
+                
+                if not isinstance(forum_channel, discord.ForumChannel):
+                    logger.error(f"Channel {task_forum_id} is not a forum channel")
+                    return
+                
+                now = datetime.datetime.now()
+                thread_name = f"{task.schema.__name__} - {now.strftime('%Y-%m-%d %H:%M')}"
+                
+                logger.info(f"Triggering scheduled task: {task.schema.__name__} in thread {thread_name}")
+                
+                task_params = task.schema(now)
+                
+                # Create a new thread in the forum
+                initial_message = f"Scheduled task triggered: {task.schema.__name__}"
+                thread = await forum_channel.create_thread(
+                    name=thread_name,
+                    content=initial_message
+                )
+                
+                # Get the message that was created with the thread
+                message = thread.message
+                
+                response = await task.execute(task_params)
+                conversation = Conversation(
+                    system_messages=[Config.get_task_system_prompt(task, response)],
+                )
+                context = await bot.route(thread.thread, conversation)
+                await context.message(message, exclude=True)
+                
+            except Exception as e:
+                logger.exception(f"Error triggering task {task.schema.__name__}: {e}")
             
         return trigger
     
@@ -696,8 +721,11 @@ async def prepare_tasks(bot: DiscordBot):
     scheduler.start()
     logger.info(f"Scheduler started with {len(tasks)} tasks")
     
-async def run(computer: Computer) -> None:
+async def run(computer: Computer, enable_tasks: bool = True) -> None:
     logger.info("Initializing Discord bot with Computer instance")
     bot = DiscordBot(computer)
-    await prepare_tasks(bot)
+    if enable_tasks:
+        await prepare_tasks(bot)
+    else:
+        logger.info("Task scheduling disabled (--notasks flag)")
     await bot.run()
