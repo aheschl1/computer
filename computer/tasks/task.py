@@ -1,43 +1,44 @@
 
 
+
+
+import abc
 import asyncio
-from collections.abc import Awaitable
+import datetime
 import inspect
-from typing import Callable, Type, TypeVar, TYPE_CHECKING, Union
-from pydantic import BaseModel
+from typing import Callable, Type, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from computer.model import ApprovalHook
 
-T = TypeVar('T', bound=BaseModel)
+class TaskParams(abc.ABC):
+    
+    def __init__(
+        self,
+        time: datetime.datetime,
+    ):
+        self.time = time
+    
+    @staticmethod
+    def periodicity() -> str:
+        """Determines how often the task should run. Returns a cron string."""
+        ...
 
-def tool(schema: type[T]):
+def task[T: TaskParams](schema: type[T]):
     """Decorator that generates the registered function for a tool."""
     def decorator(func: Callable):
-        func.registered = lambda: Tool(schema, func)  # type: ignore
+        func.registered = lambda: Task(schema, func)  # type: ignore
         return func
     return decorator
 
-def pydantic_tool(model: type[BaseModel]) -> dict:
-    schema = model.model_json_schema()
-    return {
-        "type": "function",
-        "function": {
-            "name": model.__name__,
-            "description": model.__doc__ or "",
-            "parameters": schema,
-        },
-    }
-
-class Tool[T: BaseModel]:
+class Task[T: TaskParams]:
     def __init__(
         self,
         schema: Type[T],
         function: Callable,
     ):
-        self.schema = schema
+        self.schema: Type[T] = schema
         self.function = function
-        self.openai_tool = pydantic_tool(schema)
         self.name = schema.__name__
     
     async def execute(self, input: T, approval_hook: "ApprovalHook | None" = None) -> str:

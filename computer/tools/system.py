@@ -6,7 +6,7 @@ from computer.tools.tool import Tool, tool
 
 class ExecuteCommand(BaseModel):
     """
-    Execute a command in a (non-root) linux terminal environment.
+    Execute a command in the (non-root) linux terminal environment.
     """
     command: str = Field (
         description = "Command to execute."
@@ -28,6 +28,8 @@ def execute_command(tool_input: ExecuteCommand) -> str:
     Returns:
         str: The result of the ExecuteCommand tool execution.
     """
+    if "sudo" in tool_input.command:
+        return "Error: 'sudo' commands are not allowed. Please use the ExecuteSudoCommand tool for commands requiring elevated privileges."
     subprocess_result = subprocess.run(
         tool_input.command,
         shell=True,

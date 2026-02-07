@@ -1,5 +1,6 @@
 from typing import Awaitable, Callable, Dict, Tuple, Any, List, Optional
 from json import loads
+import discord
 from pydantic import BaseModel
 import importlib
 import pkgutil
@@ -8,6 +9,7 @@ import logging
 from datetime import datetime
 
 from computer.conversation import Conversation
+from computer.tasks.task import Task, TaskParams
 from computer.tools.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,49 @@ def discover_tools() -> List[Tool]:
     return registered_tools
 
 
+def discover_tasks() -> List[Task[TaskParams]]:
+    """Discover all functions decorated with @task in computer.tasks submodules.
+    
+    Returns:
+        A list of Task instances from all decorated functions found in the package.
+    """
+    logger.info("Starting task discovery")
+    import computer.tasks as tasks_package
+    import inspect
+    
+    registered_tasks = []
+    
+    # Iterate through all submodules in computer.tasks
+    for _, modname, _ in pkgutil.iter_modules(tasks_package.__path__):
+        # Skip __pycache__ and other non-module entries
+        if modname.startswith('_'):
+            continue
+            
+        try:
+            # Import the submodule
+            full_module_name = f'computer.tasks.{modname}'
+            logger.debug(f"Scanning module: {full_module_name}")
+            module = importlib.import_module(full_module_name)
+            
+            # Iterate through all members of the module
+            for name, obj in inspect.getmembers(module):
+                # Check if it's a function decorated with @task (has registered attribute)
+                if callable(obj) and hasattr(obj, 'registered'):
+                    try:
+                        task_instance = obj.registered()  # type: ignore
+                        registered_tasks.append(task_instance)
+                        logger.info(f"Registered task: {task_instance.name} from {modname}")
+                    except Exception as e:
+                        logger.warning(f"Could not register task {name} from {modname}: {e}")
+                
+        except Exception as e:
+            # Skip modules that fail to import
+            logger.warning(f"Could not load task module {modname}: {e}")
+            continue
+    
+    logger.info(f"Discovered {len(registered_tasks)} tasks: {[task.name for task in registered_tasks]}")
+    return registered_tasks
+
 def parse_tool_call[T: BaseModel](
     tool_call: dict,
     tools_by_name: Dict[str, Tool]
@@ -98,8 +143,9 @@ def parse_tool_call[T: BaseModel](
         return None, None, f"Error parsing tool call: {str(e)}"
 
 
-def clean_discord_message(content: str, max_length: int = 2000) -> str:
+def clean_discord_message(content: str, max_length: int = 2000, user: discord.ClientUser | None = None) -> str:
     """Clean and truncate a message to fit Discord's character limit.
+    If a user is included, also removes mentions of the bot to avoid unnecessary length and potential pings.
     
     Args:
         content: The message content to clean
@@ -143,6 +189,9 @@ def clean_discord_message(content: str, max_length: int = 2000) -> str:
             if available > 20:
                 truncated = content[first_newline + 1:first_newline + 1 + available]
                 return f"{header}{truncated}..."
+    
+    if user:
+        content = content.replace(user.mention, "").strip()
     
     # Simple truncation
     return content[:max_length - 3] + "..."

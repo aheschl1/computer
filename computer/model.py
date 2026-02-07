@@ -22,6 +22,11 @@ type CycleHook = Callable[[
     bool                    # error occurred (if true, content may be error message)
 ], Awaitable[bool]]         # returns False to stop
 
+type ApprovalHook = Callable[[
+    str,                    # message to display
+    float                   # timeout in seconds
+], Awaitable[bool]]         # returns True if approved, False if denied
+
 class Computer:
     def __init__(
         self, 
@@ -30,6 +35,7 @@ class Computer:
         timeout: float = 120.0,
         conversation: Conversation | None = None,
         temperature: float = 1.0,
+        approval_hook: ApprovalHook | None = None,
     ):
         logger.info(f"Initializing Computer with {len(tools)} tools, max_cycles={max_cycles}, timeout={timeout}s")
         self.client = OpenAI(
@@ -47,6 +53,7 @@ class Computer:
         self.tool_schemas = [tool.openai_tool for tool in tools]
         self.tools_by_name = {tool.name: tool for tool in tools}
         self.temperature = temperature
+        self.approval_hook = approval_hook
         
         self.max_cycles = max_cycles
         self.abort_signal = False
@@ -58,6 +65,7 @@ class Computer:
             max_cycles=self.max_cycles,
             timeout=self.timeout,
             conversation=copy.deepcopy(self.root_conversation),
+            approval_hook=self.approval_hook,
         )
     
     def set_conversation(self, conversation: Conversation):
@@ -70,7 +78,7 @@ class Computer:
         for index, call in tool_calls.items():
             tool_name = call.get("name", "unknown")
             logger.debug(f"Executing tool: {tool_name}")
-            result = await execute_tool_call(call, self.tools_by_name)
+            result = await execute_tool_call(call, self.tools_by_name, self.approval_hook)
             results[index] = {"result": result}
             logger.debug(f"Tool {tool_name} completed with result length: {len(str(result))}")
         return results
@@ -271,14 +279,15 @@ async def process_stream(stream: Any, hook: CycleHook) -> Tuple[str, Dict[int, d
 
 async def execute_tool_call(
     tool_call: dict,
-    tools_by_name: Dict[str, Tool]
+    tools_by_name: Dict[str, Tool],
+    approval_hook: ApprovalHook | None
 ) -> str:
     """Parse and execute a tool call, returning the result or error message.
     
     Args:
         tool_call: Dict containing 'name' and 'arguments' (JSON string)
-        tool_models: Mapping of tool names to Pydantic model classes
-        tool_commands: Mapping of tool names to callable functions
+        tools_by_name: Mapping of tool names to Tool instances
+        approval_hook: Approval hook for user confirmation
         
     Returns:
         The tool execution result as a string, or an error message.
@@ -295,7 +304,7 @@ async def execute_tool_call(
     try:
         assert tool is not None and tool_input is not None
         logger.debug(f"Tool {tool_name} input: {tool_input}")
-        result = await tool.execute(tool_input)
+        result = await tool.execute(tool_input, approval_hook)
         logger.info(f"Tool {tool_name} executed successfully, result length: {len(str(result))}")
         return result
     except Exception as e:

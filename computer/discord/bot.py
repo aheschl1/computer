@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import os
 import time
 import random
@@ -12,13 +13,18 @@ from pydantic import BaseModel
 from computer.config import Config
 from computer.conversation import Conversation, ConversationStorage
 from computer.model import Computer
-from computer.utils import parse_tool_call, CommandHelpers, clean_discord_message
+from computer.tasks.task import Task, TaskParams
+from computer.utils import discover_tasks, discover_tools, parse_tool_call, CommandHelpers, clean_discord_message
 from asyncio.queues import Queue
-
+# from multiprocessing import Process
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 logger = logging.getLogger(__name__)
 DISCORD_MSG_LIMIT = 1900  # keep margin for formatting
-
+# im not AI, I just need these for legit reasons 👍😊
+THUMBS_UP = "👍"
+THUMBS_DOWN = "👎"
+# APPROVAL_REQUESTS = "ExecuteSudoCommand"
 
 class MessageUpdater:
     """Abstraction for updating Discord messages, automatically splitting when content is too long."""
@@ -194,42 +200,51 @@ async def log_tool_call(source_message: discord.Message, ephemeral_message: str,
 
     # send log entry
     if log_channel:
-        await log_channel.send(
+        log_message = (
             f"**Tool Call**\n"
             f"Source: {source_message.author.mention}\n"
             f"Channel: {source_message.channel.mention}\n" # type: ignore
             f"Message: {jump_url}\n\n"
             f"**Tool Details**\n{tools_desc}"
         )
-    # else:
-    #     timeout = None
-    # else:
-    #     # dm the user the log if no log channel found
-    #     try:
-    #         await source_message.author.send(
-    #             f"**Tool Call Logged**\n"
-    #             f"Source: {source_message.author.mention}\n"
-    #             f"Channel: {source_message.channel.name}\n"
-    #             f"Message: {jump_url}\n\n"
-    #             f"**Tool Details**\n{tools_desc}"
-    #         )
-    
-    # # temporary notification in main channel
-    # await source_message.channel.send(
-    #     ephemeral_message,
-    #     delete_after=timeout
-    # ) # type: ignore
+        # Use MessageUpdater to handle splitting into multiple messages if needed
+        updater = MessageUpdater(log_channel)
+        await updater.send_new(log_message)
+
+
+def is_mention_only_channel(channel: discord.abc.GuildChannel | discord.Thread | discord.DMChannel) -> bool:
+    if isinstance(channel, discord.Thread):
+        if any(tag.name.lower() == "mention-only" for tag in channel.applied_tags):
+            return True
+
+    # threads inherit parent topic if needed
+    topic = getattr(channel, "topic", None)
+
+    if topic and "mention-only" in topic.lower():
+        return True
+
+    # if thread, optionally check parent
+    parent = getattr(channel, "parent", None)
+    parent_topic = getattr(parent, "topic", None)
+    if parent_topic and "mention-only" in parent_topic.lower():
+        return True
+
+    return False
+
+def bot_is_mentioned(client: discord.Client, message: discord.Message) -> bool:
+    return client.user is not None and client.user.mentioned_in(message)
 
 class ConversationContext:
-    def __init__(self, computer: Computer):
+    def __init__(self, computer: Computer, client: discord.Client):
         self.computer = computer
         self.user_discord_id = int(os.environ["USER_DISCORD_ID"])
         # holds messages, and index in Conversation when they were added
-        self.message_queue: Queue[discord.Message] = Queue()
+        self.message_queue: Queue[tuple[discord.Message, bool]] = Queue()
         # self.stop = LockedInt(0)
         self.su_context = True
         self.protected_mode = True
         self.stop = False
+        self.client = client
         asyncio.create_task(self.consume())
 
     async def consume(self):
@@ -241,17 +256,28 @@ class ConversationContext:
                     await self.message_queue.get()
                 self.stop = False
                 
-            message = await self.message_queue.get()
-            if self.stop:
-                self.stop = False
-                # in this case, the system was waiting for a message
-                # there was none
-                # then /stop was issued
-                # then a message got sent
-                # the stop was irrelevant at this point
+            (message, include_content) = await self.message_queue.get()
+            # if self.stop:
+            # in this case, the system was waiting for a message
+            # there was none
+            # then /stop was issued
+            # then a message got sent
+            # the stop was irrelevant at this point
+            self.stop = False
             
             content = message.content.strip()
             is_superuser = message.author.id == self.user_discord_id or not self.protected_mode            
+            
+            if is_mention_only_channel(message.channel) and include_content: # type: ignore
+                if not bot_is_mentioned(self.client, message):
+                    logger.debug(f"Message in mention-only channel {message.channel} ignored because bot was not mentioned")
+                    # in this case, throw on the conversation still
+                    self.computer.conversation.add_message("user", clean_discord_message(content, user=self.client.user))
+                    await ConversationStorage.save(
+                        self.computer.conversation,
+                        str(message.channel.id)
+                    )
+                    continue
             
             if is_superuser:
                 seed = f"*{feedback_message()}*"
@@ -339,7 +365,7 @@ class ConversationContext:
                             f"Now speaking to {Config.user()}. Full tool access restored. Return to normal operation.",
                         )
                             
-                    await self.computer.cycle(content, hook=hook, tools_enabled=is_superuser)
+                    await self.computer.cycle(content if include_content else None, hook=hook, tools_enabled=is_superuser)
                 await ConversationStorage.save(
                     self.computer.conversation,
                     str(message.channel.id)
@@ -348,7 +374,7 @@ class ConversationContext:
             except Exception as exc:
                 logger.exception(f"Error processing message from {message.author}: {exc}")
                 error_msg = f"Nooooo: (Server Error) {exc}"
-                cleaned_error = clean_discord_message(error_msg)    
+                cleaned_error = clean_discord_message(error_msg)
                 error_updater = MessageUpdater(message.channel)
                 await error_updater.send_new(cleaned_error)
     
@@ -358,21 +384,22 @@ class ConversationContext:
         self.stop = True
         self.computer.stop_cycling() # stops cycling
         
-    async def message(self, message: discord.Message) -> None:
+    async def message(self, message: discord.Message, exclude: bool = False) -> None:
         content = message.content.strip()
         if not content:
             return
-        is_superuser = message.author.id == self.user_discord_id
+        is_superuser = (message.author.id == self.user_discord_id) or (message.author.id == self.client.user.id)
         if not is_superuser and message.channel.type == discord.ChannelType.private:
             updater = MessageUpdater(message.channel)
             await updater.send_new("Access denied.")
             return
-        await self.message_queue.put(message)
+        await self.message_queue.put((message, not exclude))
         
     @staticmethod
     async def recover_context_for_channel(
         channel, 
         computer: Computer,
+        client: discord.Client,
     ) -> "ConversationContext":
         channel_id = channel.id
         conversation: Conversation | None = ConversationStorage.load(str(channel_id))
@@ -381,15 +408,17 @@ class ConversationContext:
             parent_id = parent_channel.id
             conversation = ConversationStorage.load(parent_id)
         computer.set_conversation(conversation or Conversation())
-        return ConversationContext(computer)
+        return ConversationContext(computer, client)
             
 class DiscordBot:
     def __init__(self, computer: Computer):
         logger.info("Initializing Discord bot")
         self.computer = computer
+        self.user_discord_id = int(os.environ["USER_DISCORD_ID"])
 
         intents = discord.Intents.default()
         intents.message_content = True 
+        intents.reactions = True  # Enable reaction events
 
         self.client = discord.Client(intents=intents)
         self.tree = app_commands.CommandTree(self.client)
@@ -400,6 +429,77 @@ class DiscordBot:
 
         # attach setup hook
         self.client.setup_hook = self.setup_hook
+        
+        # Register approval hook with the computer
+        self.computer.approval_hook = self.create_approval_hook()
+    
+    def create_approval_hook(self):
+        """Create an approval hook that sends DMs and waits for reactions."""
+        async def approval_hook(message: str, timeout: float) -> bool:
+            """Send approval request to user via DM and wait for reaction.
+            
+            Args:
+                message: The message to display to the user
+                timeout: Timeout in seconds (max 3 minutes)
+                
+            Returns:
+                True if approved (thumbs up reaction), False otherwise
+            """
+            try:
+                # Get the user
+                user = await self.client.fetch_user(self.user_discord_id)
+                if not user:
+                    logger.error("Could not fetch user for approval request")
+                    return False
+                
+                # Send DM
+                approval_message = (
+                    f"**Approval Required**\n\n{message}\n\n"
+                    f"React with thumbs up to approve or anything else to deny.\n"
+                    f"Timeout: {int(timeout)} seconds"
+                )
+                # Ensure message doesn't exceed Discord limit
+                cleaned_approval = clean_discord_message(approval_message)
+                approval_msg = await user.send(cleaned_approval)
+                
+                # Add reaction options
+                await approval_msg.add_reaction(THUMBS_UP)
+                await approval_msg.add_reaction(THUMBS_DOWN)
+                
+                # Wait for reaction
+                def check(payload: discord.RawReactionActionEvent):
+                    return (
+                        payload.user_id == self.user_discord_id and
+                        payload.message_id == approval_msg.id and
+                        str(payload.emoji) in [THUMBS_UP, THUMBS_DOWN]
+                    )
+                    
+                try:
+                    payload = await self.client.wait_for(
+                        "raw_reaction_add",
+                        timeout=timeout,
+                        check=check
+                    )
+                    approved = str(payload.emoji) == THUMBS_UP
+                    result_msg = "Approved" if approved else "Denied"
+                    await approval_msg.edit(content=f"{approval_msg.content}\n\n{result_msg}")
+                    
+                    logger.info(f"Approval request {'approved' if approved else 'denied'} by user")
+                    return approved
+                    
+                except asyncio.TimeoutError:
+                    await approval_msg.edit(content=f"{approval_msg.content}\n\n**Timeout - Request Denied**")
+                    logger.warning("Approval request timed out")
+                    return False
+                    
+            except discord.Forbidden:
+                logger.error("Cannot send DM to user (privacy settings or bot blocked)")
+                return False
+            except Exception as e:
+                logger.exception(f"Error in approval hook: {e}")
+                return False
+        
+        return approval_hook
 
     async def setup_hook(self) -> None:
         """Register slash commands."""
@@ -438,10 +538,10 @@ class DiscordBot:
                 discord.ChannelType.private,
             ]:
                 # persistent context type
-                context = await ConversationContext.recover_context_for_channel(channel, self.computer.replicate())
+                context = await ConversationContext.recover_context_for_channel(channel, self.computer.replicate(), self.client)
             else:
                 # ephemeral context type
-                context = ConversationContext(self.computer.replicate())
+                context = ConversationContext(self.computer.replicate(), self.client)
             self.contexts[channel.id] = context
         return self.contexts[channel.id]
     
@@ -462,7 +562,8 @@ class DiscordBot:
         @self.tree.command(name="history", description="Show conversation history")
         async def history(interaction: discord.Interaction):
             logger.info(f"History command invoked by {interaction.user}")
-            history_text = CommandHelpers.get_history_text(self.computer.conversation, max_length=1900)
+            # Account for wrapper text: "**Conversation History**\n```\n" (30) + "\n```" (4) = ~34 chars
+            history_text = CommandHelpers.get_history_text(self.computer.conversation, max_length=1960)
             output = f"**Conversation History**\n```\n{history_text}\n```"
             cleaned_output = clean_discord_message(output)
             await interaction.response.send_message(cleaned_output, ephemeral=True)
@@ -477,6 +578,10 @@ class DiscordBot:
         @self.tree.command(name="system", description="Show current system prompt")
         async def system(interaction: discord.Interaction):
             system_prompt = CommandHelpers.get_system_prompt()
+            # Account for wrapper text: "**System Prompt**\n```\n" (25) + "\n```" (4) = ~29 chars
+            max_prompt_length = 1970
+            if len(system_prompt) > max_prompt_length:
+                system_prompt = system_prompt[:max_prompt_length] + "..."
             output = f"**System Prompt**\n```\n{system_prompt}\n```"
             cleaned_output = clean_discord_message(output)
             await interaction.response.send_message(cleaned_output, ephemeral=True)
@@ -484,6 +589,10 @@ class DiscordBot:
         @self.tree.command(name="tools", description="List available tools")
         async def tools(interaction: discord.Interaction):
             tools_text = CommandHelpers.get_tools_list(self.computer.tool_schemas)
+            # Account for wrapper text: "**Available Tools**\n" (~20 chars)
+            max_tools_length = 1980
+            if len(tools_text) > max_tools_length:
+                tools_text = tools_text[:max_tools_length] + "..."
             output = f"**Available Tools**\n{tools_text}"
             cleaned_output = clean_discord_message(output)
             await interaction.response.send_message(cleaned_output, ephemeral=True)
@@ -528,16 +637,67 @@ class DiscordBot:
                 ephemeral=True,
             )
 
-    def run(self) -> None:
+    async def run(self) -> None:
         token = os.getenv("DISCORD_TOKEN")
         if not token:
             logger.error("DISCORD_TOKEN not set in environment")
             raise RuntimeError("DISCORD_TOKEN not set")
 
         logger.info("Starting Discord bot client")
-        self.client.run(token)
+        await self.client.start(token)
 
-def run(computer: Computer) -> None:
+
+async def prepare_tasks(bot: DiscordBot):
+        
+    def build_trigger[T: TaskParams](task: Task[T]):
+        # user dms
+        async def trigger():
+            # Fetch the user and create a DM channel
+            user = await bot.client.fetch_user(int(os.environ["USER_DISCORD_ID"]))
+            channel = await user.create_dm()
+            logger.info(f"Triggering scheduled task: {task.schema.__name__}")
+            task_params = task.schema(
+                datetime.datetime.now()
+            )
+            message = await channel.send(f"Scheduled task triggered: {task.schema.__name__}")
+            
+            context = await bot.route(channel)
+            context.computer.conversation.mask(0) # mask the conversation to prevent loading too much history for the task execution
+            response = await task.execute(task_params)
+            context.computer.conversation.add_message(
+                "system",
+                f"Start scheduled task: {task.schema.__name__}. \
+                Result of trigger: {response}. Act appropriately. \
+                Your responses will be sent to the user."
+            )
+            await context.message(message, exclude=True)
+            
+        return trigger
+    
+    tasks = discover_tasks()
+    
+    scheduler = AsyncIOScheduler()
+    for task in tasks:
+        # Parse the cron string (format: minute hour day month day_of_week)
+        cron_parts = task.schema.periodicity().split()
+        if len(cron_parts) == 5:
+            minute, hour, day, month, day_of_week = cron_parts
+            scheduler.add_job(
+                build_trigger(task), 
+                trigger="cron",
+                minute=minute,
+                hour=hour,
+                day=day,
+                month=month,
+                day_of_week=day_of_week
+            )
+        else:
+            logger.warning(f"Invalid cron format for task {task.name}: {task.schema.periodicity()}")
+    scheduler.start()
+    logger.info(f"Scheduler started with {len(tasks)} tasks")
+    
+async def run(computer: Computer) -> None:
     logger.info("Initializing Discord bot with Computer instance")
     bot = DiscordBot(computer)
-    bot.run()
+    await prepare_tasks(bot)
+    await bot.run()

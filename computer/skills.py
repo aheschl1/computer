@@ -67,4 +67,11 @@ def load_skills() -> list[Skill]:
             else:
                 logger.warning(f"Failed to load skill from {item}")
     return skills
+
+def load_skill_by_name(name: str) -> Optional[Skill]:
+    skills = load_skills()
+    for skill in skills:
+        if skill.name == name:
+            return skill
+    return None
     

@@ -4,6 +4,7 @@ from computer.config import Config
 from computer.model import Computer
 from computer.utils import discover_tools, CommandHelpers
 import dotenv
+from computer.discord.bot import run as run_discord
 
 dotenv.load_dotenv("secret.env")
 
@@ -165,7 +166,8 @@ class ChatInterface:
             import traceback
             traceback.print_exc()
 
-if __name__ == "__main__":
+async def main():
+
     import argparse
     import dotenv
     dotenv.load_dotenv()
@@ -190,11 +192,13 @@ if __name__ == "__main__":
     
     # Start Discord bot or CLI interface
     if args.discord:
-        from computer.discord.bot import run as run_discord
         logger.info("Starting Discord bot...")
         print("Starting Discord bot...")
-        run_discord(computer)
+        await run_discord(computer)
     else:
         logger.info("Starting CLI interface")
         interface = ChatInterface(computer)
-        asyncio.run(interface.run())
+        await interface.run()
+        
+if __name__ == "__main__":
+    asyncio.run(main())
