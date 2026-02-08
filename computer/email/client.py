@@ -189,7 +189,7 @@ async def search_emails_imap(
     before: datetime | None = None,
     unread_only: bool = False,
     folder: str = 'INBOX',
-    max_return: int = 50
+    max_return: int = 10
 ) -> list[Email]:
     """
     Search for emails based on various criteria.

@@ -4,7 +4,7 @@ import asyncio
 import subprocess
 import os
 from pydantic import BaseModel, Field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from computer.tools.tool import tool
 
@@ -18,7 +18,7 @@ class ExecuteSudoCommand(BaseModel):
     Only use if you need to run with 'sudo' permissions.
     """
     command: str
-    timeout: int | None = Field (
+    timeout: Optional[int] = Field (
         default = 120,
         description = "Timeout in seconds for command execution."
     )

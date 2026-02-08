@@ -6,9 +6,9 @@ import json
 import subprocess
 import os
 from pydantic import BaseModel, Field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from computer.gmail.client import delete_email_imap, search_emails_imap, send_smtp
+from computer.email.client import delete_email_imap, search_emails_imap, send_smtp
 from computer.tools.tool import tool
 
 if TYPE_CHECKING:
@@ -24,8 +24,8 @@ class SendEmail(BaseModel):
     body: str = Field(..., description="The body of the email to send.")
     subject: str = Field(..., description="The subject of the email.")
     to: str = Field(..., description="The recipient email address.")
-    cc: str | None = Field(None, description="The CC email address.")
-    bcc: str | None = Field(None, description="The BCC email address.")
+    cc: Optional[str] = Field(None, description="The CC email address.")
+    bcc: Optional[str] = Field(None, description="The BCC email address.")
     html: bool = Field(False, description="Send the body as rich HTML content.")
 
 class DeleteEmail(BaseModel):
@@ -38,12 +38,12 @@ class SearchEmails(BaseModel):
     """
     Search for emails in the user's inbox that match a query.
     """
-    sender: str | None = Field(None, description="Filter emails by sender email address.")
-    subject: str | None = Field(None, description="Filter emails by subject content.")
-    body: str | None = Field(None, description="Filter emails by body content.")
-    unread_only: bool | None = Field(None, description="Filter for only unread emails.")
-    since: str | None = Field(ONE_DAY_AGO.strftime("%Y-%m-%d"), description="Filter for emails received since this date (YYYY-MM-DD).")
-    before: str | None = Field(None, description="Filter for emails received before this date (YYYY-MM-DD).")
+    sender: Optional[str] = Field(None, description="Filter emails by sender email address.")
+    subject: Optional[str] = Field(None, description="Filter emails by subject content.")
+    body: Optional[str] = Field(None, description="Filter emails by body content.")
+    unread_only: Optional[bool] = Field(None, description="Filter for only unread emails.")
+    since: Optional[str] = Field(ONE_DAY_AGO.strftime("%Y-%m-%d"), description="Filter for emails received since this date (YYYY-MM-DD).")
+    before: Optional[str] = Field(None, description="Filter for emails received before this date (YYYY-MM-DD).")
 
 @tool(SearchEmails)
 async def search_emails(command: SearchEmails) -> str:

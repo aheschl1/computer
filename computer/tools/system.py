@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Optional
 from pydantic import BaseModel, Field
 import subprocess
 
@@ -12,7 +12,7 @@ class ExecuteCommand(BaseModel):
         description = "Command to execute."
     )
     
-    timeout: int | None = Field (
+    timeout: Optional[int] = Field (
         default = 20,
         description = "Timeout in seconds for command execution."
     )

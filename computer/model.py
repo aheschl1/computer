@@ -172,6 +172,7 @@ class Computer:
         self.handle_assistant_msg(response_content, full_tool_calls)
         
         if full_tool_calls:
+            print(full_tool_calls)
             if not tools_enabled:
                 logger.warning("Tool calls received but tools are disabled. Skipping execution.")
                 self.conversation.add_message(

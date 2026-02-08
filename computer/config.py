@@ -133,3 +133,7 @@ class Config:
     @staticmethod
     def get_task_forum_id() -> int:
         return int(os.getenv("TASK_FORUM_ID", "0"))
+    
+    @staticmethod
+    def get_google_credentials_path() -> str:
+        return os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")

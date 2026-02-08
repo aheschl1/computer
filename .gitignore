@@ -49,3 +49,5 @@ token.log
 
 # Cache
 .cache/
+
+*secret*

@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable
 import inspect
 from typing import Callable, Type, TypeVar, TYPE_CHECKING, Union
+import openai
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -18,17 +19,6 @@ def tool(schema: type[T]):
         return func
     return decorator
 
-def pydantic_tool(model: type[BaseModel]) -> dict:
-    schema = model.model_json_schema()
-    return {
-        "type": "function",
-        "function": {
-            "name": model.__name__,
-            "description": model.__doc__ or "",
-            "parameters": schema,
-        },
-    }
-
 class Tool[T: BaseModel]:
     def __init__(
         self,
@@ -37,7 +27,7 @@ class Tool[T: BaseModel]:
     ):
         self.schema = schema
         self.function = function
-        self.openai_tool = pydantic_tool(schema)
+        self.openai_tool = openai.pydantic_function_tool(schema) 
         self.name = schema.__name__
     
     async def execute(self, input: T, approval_hook: "ApprovalHook | None" = None) -> str:
