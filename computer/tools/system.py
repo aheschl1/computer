@@ -28,7 +28,7 @@ def execute_command(tool_input: ExecuteCommand) -> str:
     Returns:
         str: The result of the ExecuteCommand tool execution.
     """
-    if "sudo" in tool_input.command:
+    if tool_input.command.strip().startswith("sudo "):
         return "Error: 'sudo' commands are not allowed. Please use the ExecuteSudoCommand tool for commands requiring elevated privileges."
     subprocess_result = subprocess.run(
         tool_input.command,
