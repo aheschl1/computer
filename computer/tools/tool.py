@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Awaitable
 import inspect
-from typing import Callable, Type, TypeVar, TYPE_CHECKING, Union
+from typing import Callable, Literal, Optional, Type, TypeVar, TYPE_CHECKING, Union
 import openai
 from pydantic import BaseModel
 
@@ -12,10 +12,10 @@ if TYPE_CHECKING:
 
 T = TypeVar('T', bound=BaseModel)
 
-def tool(schema: type[T]):
+def tool(schema: type[T], platform: Optional[Literal["linux", "windows"]] = None):
     """Decorator that generates the registered function for a tool."""
     def decorator(func: Callable):
-        func.registered = lambda: Tool(schema, func)  # type: ignore
+        func.registered = lambda: Tool(schema, func, platform)  # type: ignore
         return func
     return decorator
 
@@ -24,9 +24,11 @@ class Tool[T: BaseModel]:
         self,
         schema: Type[T],
         function: Callable,
+        platform: Optional[Literal["linux", "windows"]] = None,
     ):
         self.schema = schema
         self.function = function
+        self.platform = platform
         self.openai_tool = openai.pydantic_function_tool(schema) 
         self.name = schema.__name__
     

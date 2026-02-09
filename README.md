@@ -1,3 +1,6 @@
+## To run
+`python computer\cli.py` (`--discord`, `--notasks`)
+
 # Computer
 
 Agent system that integrates with your Linux machine, providing assistance through primarily a Discord interface. The agent can execute system commands, search the web, manage emails, and perform scheduled tasks while maintaining conversational context.

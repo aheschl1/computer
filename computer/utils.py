@@ -7,6 +7,7 @@ import pkgutil
 import json
 import logging
 from datetime import datetime
+import sys
 
 from computer.conversation import Conversation
 from computer.tasks.task import Task, TaskParams
@@ -45,8 +46,11 @@ def discover_tools() -> List[Tool]:
                 if callable(obj) and hasattr(obj, 'registered'):
                     try:
                         tool_instance = obj.registered()  # type: ignore
-                        registered_tools.append(tool_instance)
-                        logger.info(f"Registered tool: {tool_instance.name} from {modname}")
+                        # Only register if platform matches or is platform-agnostic
+                        current_platform = "windows" if sys.platform == "win32" else "linux"
+                        if tool_instance.platform is None or tool_instance.platform == current_platform:
+                            registered_tools.append(tool_instance)
+                            logger.info(f"Registered tool: {tool_instance.name} from {modname}")
                     except Exception as e:
                         logger.warning(f"Could not register tool {name} from {modname}: {e}")
                 
