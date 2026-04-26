@@ -483,7 +483,7 @@ class DiscordBot:
                     )
                     approved = str(payload.emoji) == THUMBS_UP
                     result_msg = "Approved" if approved else "Denied"
-                    await approval_msg.edit(content=f"{approval_msg.content}\n\n{result_msg}")
+                    await approval_msg.edit(content=f"{approval_msg.content}\n\n{result_msg}"[:2000])
                     
                     logger.info(f"Approval request {'approved' if approved else 'denied'} by user")
                     return approved
@@ -533,11 +533,12 @@ class DiscordBot:
         """Route to the appropriate ConversationContext based on channel ID."""
         if channel.id not in self.contexts:
             context = None
+            # if the name is bot-only, always recover, and also set a different system prompt
             if channel.type in [
                 discord.ChannelType.public_thread,
                 discord.ChannelType.private_thread,
                 discord.ChannelType.private,
-            ]:
+            ] or channel.name and "bot-only" in channel.name.lower():
                 # persistent context type
                 context = await ConversationContext.recover_context_for_channel(channel, self.computer.replicate(), self.client, conversation)
             else:
